@@ -1,0 +1,28 @@
+{
+  "name": "cairnstone-tool-miner-mcp",
+  "version": "0.1.0",
+  "description": "Post-stone MCP for parsing sources into evidence-backed MCP tool recommendations and blueprint candidates.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "ci": "npm run typecheck && npm test",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [
+    "mcp",
+    "cairnstone",
+    "toolsmith",
+    "cloudflare-workers",
+    "json-rpc"
+  ],
+  "author": "nothinginfinity",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260620.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.20.5"
+  }
+}
