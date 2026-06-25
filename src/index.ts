@@ -194,7 +194,7 @@ function plan(args: { candidates: any[]; mode?: string }) {
       { phase: 1, name: "Evidence lock", steps: ["Attach candidates to source evidence.", "Create a tool-opportunity-report stone."] },
       { phase: 2, name: "Schema hardening", steps: selected.map((c) => `Finalize input_schema for ${c.name}.`) },
       { phase: 3, name: "Blueprint compile dry-run", steps: ["Generate blueprint candidate.", "Call compile_blueprint."] },
-      { phase: 4, name: "Stamp and index", steps: ["Stamp approved worker.", "Index in Toolsmith."] }
+      { phase: 4, name: "Stamp and index", steps: ["Stamp approved worker.", "Stone generated files.", "Index in Toolsmith."] }
     ],
     scored_candidates: selected
   };
