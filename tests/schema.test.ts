@@ -26,8 +26,3 @@ describe("cairnstone tool miner", () => {
     expect(JSON.stringify(miner?.inputSchema)).toContain("chain");
   });
 });
-
-  it("parses source into candidates", () => {
-});
-
-});
