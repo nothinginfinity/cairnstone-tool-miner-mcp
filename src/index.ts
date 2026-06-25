@@ -1,5 +1,30 @@
 type Source = { type: string; name: string; content?: string; metadata?: Record<string, unknown> };
 type Evidence = { kind: string; value: string; reason: string; confidence: number };
+type Env = { MCP_SERVER_NAME?: string; CAIRNSTONE_API_URL?: string; CAIRNSTONE_MCP_URL?: string };
+
+type CairnstoneNode = {
+  hash?: string;
+  short_hash?: string;
+  title?: string;
+  is_head?: boolean;
+  lod5?: string;
+  lod4?: string;
+  path?: string;
+  repo?: string;
+  chain?: string;
+};
+
+type CairnstoneManifest = {
+  ok?: boolean;
+  chain?: string;
+  head_hash?: string | null;
+  head_updated_at?: string | null;
+  stone_count?: number;
+  nodes?: CairnstoneNode[];
+  edges?: unknown[];
+};
+
+const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
@@ -7,7 +32,8 @@ const toolNames = [
   "generate_blueprint_candidates",
   "score_tool_candidates",
   "compare_against_toolsmith_inventory",
-  "create_build_plan"
+  "create_build_plan",
+  "mine_cairnstone_chain"
 ];
 
 const descriptions: Record<string, string> = {
@@ -16,7 +42,8 @@ const descriptions: Record<string, string> = {
   generate_blueprint_candidates: "Convert parsed candidates into build-factory-style blueprint candidates.",
   score_tool_candidates: "Rank candidates by utility, evidence, effort, safety, and duplication risk.",
   compare_against_toolsmith_inventory: "Compare recommendations against known Toolsmith tools.",
-  create_build_plan: "Produce an ordered build plan for selected candidates."
+  create_build_plan: "Produce an ordered build plan for selected candidates.",
+  mine_cairnstone_chain: "Read a CairnStone chain through the CairnStone API/MCP, mine HEAD/LOD/query-expanded context, and return tool recommendations."
 };
 
 const schema = {
@@ -33,6 +60,20 @@ const schema = {
         metadata: { type: "object" }
       }
     }
+  }
+};
+
+const mineChainSchema = {
+  type: "object",
+  required: ["chain"],
+  properties: {
+    chain: { type: "string", description: "CairnStone chain name to mine." },
+    query: { type: "string", description: "Optional focused query for query-expand." },
+    max_stones: { type: "number", default: 12 },
+    top_k: { type: "number", default: 5 },
+    context_lines: { type: "number", default: 40 },
+    cairnstone_api_url: { type: "string", description: "Optional override for CAIRNSTONE_API_URL." },
+    cairnstone_mcp_url: { type: "string", description: "Optional override for CAIRNSTONE_MCP_URL." }
   }
 };
 
@@ -158,22 +199,157 @@ function plan(args: { candidates: any[]; mode?: string }) {
   };
 }
 
+function normalizeCairnstoneBase(args: any, env?: Env) {
+  const raw = args?.cairnstone_api_url ?? args?.cairnstone_mcp_url ?? env?.CAIRNSTONE_API_URL ?? env?.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL;
+  return String(raw).replace(/\/mcp\/?$/, "").replace(/\/+$/, "");
+}
+
+function mcpUrl(base: string) {
+  return `${base}/mcp`;
+}
+
+function decodeMcpToolResult(result: any) {
+  if (result?.structuredContent) return result.structuredContent;
+  const text = result?.content?.find?.((item: any) => item?.type === "text")?.text;
+  if (typeof text === "string") {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { ok: true, text };
+    }
+  }
+  return result;
+}
+
+async function cairnstoneTool(base: string, name: string, args: Record<string, unknown>) {
+  const response = await fetch(mcpUrl(base), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: `${name}-${Date.now()}`, method: "tools/call", params: { name, arguments: args } })
+  });
+  const payload: any = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.error) {
+    const message = payload?.error?.message ?? `CairnStone ${name} failed with HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return decodeMcpToolResult(payload.result);
+}
+
+function nodeSummary(node: CairnstoneNode) {
+  return [
+    `hash=${node.hash ?? ""}`,
+    `head=${node.is_head === true}`,
+    `title=${node.title ?? ""}`,
+    `lod5=${node.lod5 ?? ""}`
+  ].join(" | ");
+}
+
+async function mineChain(args: { chain: string; query?: string; max_stones?: number; top_k?: number; context_lines?: number; cairnstone_api_url?: string; cairnstone_mcp_url?: string }, env?: Env) {
+  if (!args.chain) throw new Error("mine_cairnstone_chain requires a chain name.");
+
+  const base = normalizeCairnstoneBase(args, env);
+  const maxStones = Math.max(1, Math.min(50, args.max_stones ?? 12));
+  const topK = Math.max(1, Math.min(10, args.top_k ?? 5));
+  const contextLines = Math.max(0, Math.min(200, args.context_lines ?? 40));
+  const query = args.query ?? "mcp tool tools/list tools/call endpoint route schema blueprint worker cairnstone chain head ref bindings deploy status admin";
+
+  const manifest = await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain: args.chain }) as CairnstoneManifest;
+  const nodes = manifest.nodes ?? [];
+  const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
+  if (!headHash) throw new Error(`No HEAD or stones found for chain: ${args.chain}`);
+
+  const selectedNodes = [
+    ...nodes.filter((node) => node.hash === headHash),
+    ...nodes.filter((node) => node.hash !== headHash)
+  ].slice(0, maxStones);
+
+  const [headLod5, headLod4, queryExpand] = await Promise.all([
+    cairnstoneTool(base, "cairnstone_get_lod", { hash: headHash, level: "lod5" }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) })),
+    cairnstoneTool(base, "cairnstone_get_lod", { hash: headHash, level: "lod4" }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) })),
+    cairnstoneTool(base, "cairnstone_query_and_expand", { stone_hash: headHash, query, top_k: topK, context_lines: contextLines, include_metadata: true }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+  ]);
+
+  const content = [
+    `CHAIN ${args.chain}`,
+    `HEAD ${headHash}`,
+    `HEAD_UPDATED_AT ${manifest.head_updated_at ?? ""}`,
+    `STONE_COUNT ${manifest.stone_count ?? nodes.length}`,
+    "",
+    "LOD_SUMMARIES",
+    ...selectedNodes.map(nodeSummary),
+    "",
+    "HEAD_LOD5",
+    JSON.stringify(headLod5),
+    "",
+    "HEAD_LOD4",
+    JSON.stringify(headLod4),
+    "",
+    "QUERY_EXPAND",
+    JSON.stringify(queryExpand),
+    "",
+    "GRAPH_EDGES",
+    JSON.stringify(manifest.edges ?? [])
+  ].join("\n");
+
+  const minedSource: Source = {
+    type: "cairnstone_chain",
+    name: args.chain,
+    content,
+    metadata: {
+      chain: args.chain,
+      head_hash: headHash,
+      node_count: nodes.length,
+      selected_node_count: selectedNodes.length,
+      cairnstone_api_url: base,
+      query
+    }
+  };
+
+  const parsed = parse({ source: minedSource });
+
+  return {
+    ...parsed,
+    chain: args.chain,
+    cairnstone: {
+      api_url: base,
+      mcp_url: mcpUrl(base),
+      head_hash: headHash,
+      node_count: nodes.length,
+      selected_node_count: selectedNodes.length
+    },
+    mining_steps: ["get_chain_manifest", "resolve_HEAD", "collect_LOD_summaries", "query_expand_HEAD", "parse_source_for_tool_opportunities"],
+    manifest_summary: {
+      head_hash: manifest.head_hash,
+      head_updated_at: manifest.head_updated_at,
+      stone_count: manifest.stone_count,
+      edges_count: Array.isArray(manifest.edges) ? manifest.edges.length : 0
+    },
+    head_lod5: headLod5,
+    head_lod4: headLod4,
+    query_expand: queryExpand,
+    source_summary: minedSource
+  };
+}
+
 export function listTools() {
-  return toolNames.map((name) => ({ name, description: descriptions[name], inputSchema: schema }));
+  const schemaForTool = (name: string) => name === "mine_cairnstone_chain" ? mineChainSchema : schema;
+  return toolNames.map((name) => ({ name, description: descriptions[name], inputSchema: schemaForTool(name) }));
 }
 
 export function callTool(name: string, args: any) {
-  const table: Record<string, () => unknown> = {
+  const env = (arguments.length > 2 ? arguments[2] : undefined) as Env | undefined;
+  const table: Record<string, () => unknown | Promise<unknown>> = {
     parse_source_for_tool_opportunities: () => parse(args),
     extract_existing_mcp_tools: () => ({ ok: true, tools: existing(args.source) }),
     generate_blueprint_candidates: () => ({ ok: true, blueprints: blueprints(args) }),
     score_tool_candidates: () => ({ ok: true, candidates: score(args) }),
     compare_against_toolsmith_inventory: () => compare(args),
-    create_build_plan: () => plan(args)
+    create_build_plan: () => plan(args),
+    mine_cairnstone_chain: () => mineChain(args, env)
   };
   const result = table[name]?.();
   if (!result) throw new Error(`Unknown tool: ${name}`);
-  return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  return Promise.resolve(result).then((resolved) => ({ content: [{ type: "text", text: JSON.stringify(resolved, null, 2) }], structuredContent: resolved }));
 }
 
 function json(data: unknown, status = 200) {
@@ -181,12 +357,13 @@ function json(data: unknown, status = 200) {
 }
 
 async function rpc(request: Request) {
+  const env = (arguments.length > 1 ? arguments[1] : undefined) as Env | undefined;
   const payload: any = await request.json();
   const id = payload.id ?? null;
   try {
     if (payload.method === "initialize") return json({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "cairnstone-tool-miner-mcp", version: "0.1.0" } } });
     if (payload.method === "tools/list") return json({ jsonrpc: "2.0", id, result: { tools: listTools() } });
-    if (payload.method === "tools/call") return json({ jsonrpc: "2.0", id, result: callTool(payload.params?.name, payload.params?.arguments ?? {}) });
+    if (payload.method === "tools/call") return json({ jsonrpc: "2.0", id, result: await (callTool as any)(payload.params?.name, payload.params?.arguments ?? {}, env) });
     return json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown method" } }, 404);
   } catch (error) {
     return json({ jsonrpc: "2.0", id, error: { code: -32000, message: error instanceof Error ? error.message : "Tool execution failed" } }, 400);
@@ -195,11 +372,12 @@ async function rpc(request: Request) {
 
 export default {
   async fetch(request: Request): Promise<Response> {
+    const env = (arguments.length > 1 ? arguments[1] : {}) as Env;
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return json({});
-    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", tools: toolNames });
+    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", tools: toolNames, cairnstone_api_url_configured: Boolean(env?.CAIRNSTONE_API_URL ?? env?.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL) });
     if (request.method === "GET" && url.pathname === "/") return json({ ok: true, name: "cairnstone-tool-miner-mcp", endpoints: ["/health", "/mcp"], tools: toolNames });
-    if (request.method === "POST" && url.pathname === "/mcp") return rpc(request);
+    if (request.method === "POST" && url.pathname === "/mcp") return (rpc as any)(request, env);
     return json({ ok: false, error: "not_found" }, 404);
   }
 };
