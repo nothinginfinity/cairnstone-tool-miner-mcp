@@ -208,6 +208,109 @@ function mcpUrl(base: string) {
   return `${base}/mcp`;
 }
 
+async function getJson(base: string, path: string) {
+  const response = await fetch(`${base}${path}`, { method: "GET", headers: { "accept": "application/json" } });
+  const payload: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`CairnStone REST GET ${path} failed with HTTP ${response.status}`);
+  return payload;
+}
+
+async function postJson(base: string, path: string, body: Record<string, unknown>) {
+  const response = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "accept": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`CairnStone REST POST ${path} failed with HTTP ${response.status}`);
+  return payload;
+}
+
+function unwrapTextJson(payload: any) {
+  if (typeof payload?.text === "string") {
+    try {
+      return JSON.parse(payload.text);
+    } catch {
+      return payload;
+    }
+  }
+  return payload;
+}
+
+function normalizeStoneList(payload: any, chain: string): CairnstoneNode[] {
+  const unwrapped = unwrapTextJson(payload);
+  const raw = Array.isArray(unwrapped?.stones) ? unwrapped.stones : Array.isArray(unwrapped?.data?.stones) ? unwrapped.data.stones : Array.isArray(unwrapped) ? unwrapped : [];
+  return raw
+    .filter((stone: any) => !stone?.chain || stone.chain === chain)
+    .map((stone: any) => ({
+      hash: stone.hash,
+      short_hash: stone.short_hash,
+      title: stone.title,
+      is_head: stone.is_head === true,
+      lod5: stone.lod5,
+      lod4: stone.lod4,
+      path: stone.path,
+      repo: stone.repo,
+      chain: stone.chain
+    }));
+}
+
+async function cairnstoneManifest(base: string, chain: string): Promise<CairnstoneManifest> {
+  try {
+    return await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain }) as CairnstoneManifest;
+  } catch (mcpError) {
+    const listPayload = await getJson(base, `/v1/stones?chain=${encodeURIComponent(chain)}&limit=200`);
+    const nodes = normalizeStoneList(listPayload, chain);
+    const head = nodes.find((node) => node.is_head) ?? nodes[0];
+    return {
+      ok: true,
+      chain,
+      head_hash: head?.hash ?? null,
+      head_updated_at: null,
+      stone_count: nodes.length,
+      nodes,
+      edges: [],
+      fallback: {
+        used: "rest_list_stones",
+        mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError)
+      } as any
+    } as CairnstoneManifest;
+  }
+}
+
+async function cairnstoneLod(base: string, hash: string, level: "lod4" | "lod5") {
+  try {
+    return await cairnstoneTool(base, "cairnstone_get_lod", { hash, level });
+  } catch (mcpError) {
+    try {
+      return await getJson(base, `/v1/stones/${encodeURIComponent(hash)}/lod/${level}`);
+    } catch (restError) {
+      return {
+        ok: false,
+        mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError),
+        rest_error: restError instanceof Error ? restError.message : String(restError)
+      };
+    }
+  }
+}
+
+async function cairnstoneQueryExpand(base: string, hash: string, query: string, topK: number, contextLines: number) {
+  const body = { stone_hash: hash, query, top_k: topK, context_lines: contextLines, include_metadata: true };
+  try {
+    return await cairnstoneTool(base, "cairnstone_query_and_expand", body);
+  } catch (mcpError) {
+    try {
+      return await postJson(base, "/v1/query-expand", body);
+    } catch (restError) {
+      return {
+        ok: false,
+        mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError),
+        rest_error: restError instanceof Error ? restError.message : String(restError)
+      };
+    }
+  }
+}
+
 function decodeMcpToolResult(result: any) {
   if (result?.structuredContent) return result.structuredContent;
   const text = result?.content?.find?.((item: any) => item?.type === "text")?.text;
@@ -254,6 +357,8 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   const query = args.query ?? "mcp tool tools/list tools/call endpoint route schema blueprint worker cairnstone chain head ref bindings deploy status admin";
 
   const manifest = await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain: args.chain }) as CairnstoneManifest;
+  const manifest = await cairnstoneManifest(base, args.chain);
+  const nodes = manifest.nodes ?? [];
   const nodes = manifest.nodes ?? [];
   const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   if (!headHash) throw new Error(`No HEAD or stones found for chain: ${args.chain}`);
@@ -264,10 +369,12 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   ].slice(0, maxStones);
 
   const [headLod5, headLod4, queryExpand] = await Promise.all([
-    cairnstoneTool(base, "cairnstone_get_lod", { hash: headHash, level: "lod5" }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) })),
-    cairnstoneTool(base, "cairnstone_get_lod", { hash: headHash, level: "lod4" }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) })),
-    cairnstoneTool(base, "cairnstone_query_and_expand", { stone_hash: headHash, query, top_k: topK, context_lines: contextLines, include_metadata: true }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    cairnstoneLod(base, headHash, "lod5"),
+    cairnstoneLod(base, headHash, "lod4"),
+    cairnstoneQueryExpand(base, headHash, query, topK, contextLines)
   ]);
+
+  const content = [  ]);
 
   const content = [
     `CHAIN ${args.chain}`,
