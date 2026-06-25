@@ -359,7 +359,7 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   const manifest = await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain: args.chain }) as CairnstoneManifest;
   const manifest = await cairnstoneManifest(base, args.chain);
   const nodes = manifest.nodes ?? [];
-  const nodes = manifest.nodes ?? [];
+  const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   if (!headHash) throw new Error(`No HEAD or stones found for chain: ${args.chain}`);
 
@@ -369,12 +369,13 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   ].slice(0, maxStones);
 
   const [headLod5, headLod4, queryExpand] = await Promise.all([
+  const [headLod5, headLod4, queryExpand] = await Promise.all([
     cairnstoneLod(base, headHash, "lod5"),
     cairnstoneLod(base, headHash, "lod4"),
     cairnstoneQueryExpand(base, headHash, query, topK, contextLines)
   ]);
 
-  const content = [  ]);
+  const content = [  const content = [  ]);
 
   const content = [
     `CHAIN ${args.chain}`,
