@@ -22,6 +22,7 @@ type CairnstoneManifest = {
   stone_count?: number;
   nodes?: CairnstoneNode[];
   edges?: unknown[];
+  fallback?: unknown;
 };
 
 const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
@@ -193,7 +194,7 @@ function plan(args: { candidates: any[]; mode?: string }) {
       { phase: 1, name: "Evidence lock", steps: ["Attach candidates to source evidence.", "Create a tool-opportunity-report stone."] },
       { phase: 2, name: "Schema hardening", steps: selected.map((c) => `Finalize input_schema for ${c.name}.`) },
       { phase: 3, name: "Blueprint compile dry-run", steps: ["Generate blueprint candidate.", "Call compile_blueprint."] },
-      { phase: 4, name: "Stamp and index", steps: ["Stamp approved worker.", "Stone generated files.", "Index in Toolsmith."] }
+      { phase: 4, name: "Stamp and index", steps: ["Stamp approved worker.", "Index in Toolsmith."] }
     ],
     scored_candidates: selected
   };
@@ -273,8 +274,8 @@ async function cairnstoneManifest(base: string, chain: string): Promise<Cairnsto
       fallback: {
         used: "rest_list_stones",
         mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError)
-      } as any
-    } as CairnstoneManifest;
+      }
+    };
   }
 }
 
@@ -356,10 +357,8 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   const contextLines = Math.max(0, Math.min(200, args.context_lines ?? 40));
   const query = args.query ?? "mcp tool tools/list tools/call endpoint route schema blueprint worker cairnstone chain head ref bindings deploy status admin";
 
-  const manifest = await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain: args.chain }) as CairnstoneManifest;
   const manifest = await cairnstoneManifest(base, args.chain);
   const nodes = manifest.nodes ?? [];
-  const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   if (!headHash) throw new Error(`No HEAD or stones found for chain: ${args.chain}`);
 
@@ -369,13 +368,10 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   ].slice(0, maxStones);
 
   const [headLod5, headLod4, queryExpand] = await Promise.all([
-  const [headLod5, headLod4, queryExpand] = await Promise.all([
     cairnstoneLod(base, headHash, "lod5"),
     cairnstoneLod(base, headHash, "lod4"),
     cairnstoneQueryExpand(base, headHash, query, topK, contextLines)
   ]);
-
-  const content = [  const content = [  ]);
 
   const content = [
     `CHAIN ${args.chain}`,
