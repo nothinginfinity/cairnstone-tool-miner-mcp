@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --pool forks",
     "ci": "npm run typecheck && npm test",
     "deploy": "wrangler deploy"
   },
