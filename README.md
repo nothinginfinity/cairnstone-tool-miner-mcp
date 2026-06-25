@@ -1,5 +1,29 @@
 # CairnStone Tool Miner MCP
 
+## Post-Stone Tool Mining Flow
+
+```mermaid
+flowchart TD
+%% CairnStone Tool Miner MCP post-stone flow
+  source["Sources\nrepos · docs · websites · MCP code"]
+  stone["CairnStone chain\nmanifest · HEAD · refs · LODs"]
+  miner["Tool Miner MCP\n/mcp JSON-RPC endpoint"]
+  evidence["Evidence extractor\nroutes · tools · schemas · bindings"]
+  candidates["Tool candidates\nstrict names · input schemas · confidence"]
+  toolsmith["Toolsmith comparison\nduplicates · gaps · overlaps"]
+  blueprints["Blueprint candidates\nbuild-factory ready JSON"]
+  buildplan["Build plan\nordered phases before stamping"]
+
+  source -->|"stone source"| stone
+  stone -->|"parse post-stone context"| miner
+  miner -->|"extract signals"| evidence
+  evidence -->|"recommend MCP tools"| candidates
+  candidates -->|"compare inventory"| toolsmith
+  candidates -->|"generate blueprint JSON"| blueprints
+  toolsmith -->|"rank and de-duplicate"| buildplan
+  blueprints -->|"compile-ready plan"| buildplan
+```
+
 A post-stone MCP that parses CairnStone chains, GitHub repositories, documents, websites, and existing MCP code into strict, evidence-backed MCP tool recommendations.
 
 This repo is intentionally shaped like a post-stone MCP: source intake happens elsewhere, CairnStone provides durable context, and this worker turns that context into tool opportunities, blueprint candidates, and implementation plans.
