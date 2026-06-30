@@ -193,7 +193,7 @@ function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; pro
       files: [{ path: `${basePath}/src/index.ts`, role: "worker_mcp_entrypoint", generated: true }, { path: `${basePath}/package.json`, role: "npm_scripts_and_dev_dependencies", generated: true }, { path: `${basePath}/wrangler.toml`, role: "worker_deploy_config", generated: true }, { path: `${basePath}/README.md`, role: "developer_usage_docs", generated: true }, { path: `${basePath}/tests/schema.test.ts`, role: "schema_and_contract_tests", generated: true }],
       wrangler: { name: workerSlug, main: "src/index.ts", compatibility_date: DEFAULT_COMPATIBILITY_DATE, workers_dev: true, vars: { MCP_SERVER_NAME: workerSlug, AFO_APP_KIND: "no_auth_developer_mcp" }, services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5" }], secrets: [] },
       toolsmith: { registry_kind: "generated_no_auth_dev_mcp_app", dedupe_key: `${namespace}/${workerSlug}`, receipt_required: true, cairnstone_source_required: true },
-      receipts: { build_receipt_path: `${basePath}/receipts/build.json`,  "Developer MCP/app intended for public no-auth tool calls." }
+      
     }
   };
 }
