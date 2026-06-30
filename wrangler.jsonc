@@ -13,5 +13,8 @@
       "binding": "CAIRNSTONE_V5",
       "service": "cairnstone-v5"
     }
-  ]
+  ],
+  "ai": {
+    "binding": "AI"
+  }
 }
