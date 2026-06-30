@@ -8,7 +8,7 @@ type Env = {
   CAIRNSTONE_V5?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
 };
 type CairnstoneNode = { hash?: string; title?: string; is_head?: boolean; lod5?: string; lod4?: string; path?: string; repo?: string; chain?: string };
-type CairnstoneManifest = { ok?: boolean; chain?: string; head_hash?: string | null; head_updated_at?: string | null; stone_count?: number; nodes?: CairnstoneNode[]; edges?: unknown[]; fallback?: unknown };
+type CairnstoneManifest = { ok?: boolean; chain?: string; head_hash?: string | null; head_updated_at?: string | null; stone_count?: number; nodes?: CairnstoneNode[]; edges?: unknown[]; bridge_source?: string };
 
 const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
@@ -33,7 +33,7 @@ const descriptions: Record<string, string> = {
   score_tool_candidates: "Rank candidates by utility, evidence, effort, safety, and duplication risk.",
   compare_against_toolsmith_inventory: "Compare recommendations against known Toolsmith tools.",
   create_build_plan: "Produce an ordered build plan for selected candidates.",
-  mine_cairnstone_chain: "Read a CairnStone chain through the CairnStone V5 service binding, mine HEAD/LOD/query-expanded context, and return tool recommendations."
+  mine_cairnstone_chain: "Read a CairnStone chain through CAIRNSTONE_V5 service binding first, then HTTP fallback, and return tool recommendations."
 };
 
 const sourceSchema = {
@@ -72,8 +72,8 @@ const mineChainSchema = {
     max_stones: { type: "number", default: 12 },
     top_k: { type: "number", default: 5 },
     context_lines: { type: "number", default: 40 },
-    cairnstone_api_url: { type: "string", description: "Optional fallback override when no CAIRNSTONE_V5 service binding is present." },
-    cairnstone_mcp_url: { type: "string", description: "Optional fallback override when no CAIRNSTONE_V5 service binding is present." }
+    cairnstone_api_url: { type: "string", description: "Fallback override when no service binding is available." },
+    cairnstone_mcp_url: { type: "string", description: "Fallback override when no service binding is available." }
   }
 };
 
@@ -110,9 +110,8 @@ function evidence(source: Source): Evidence[] {
 }
 
 function candidate(name: string, category: string, description: string, sourceEvidence: Evidence[], overrides: Candidate = {}): Candidate {
-  const safeName = slugify(name).replace(/-/g, "_");
   return {
-    name: safeName,
+    name: slugify(name).replace(/-/g, "_"),
     display_name: displayName(name),
     description,
     category,
@@ -130,7 +129,7 @@ function candidate(name: string, category: string, description: string, sourceEv
     output_schema: { type: "object", properties: { ok: { type: "boolean" }, result: { type: "object" }, evidence: { type: "array", items: { type: "object" } } } },
     bindings_needed: [{ type: "secret_text", binding: "GITHUB_TOKEN", reason: "Optional GitHub source expansion token.", required: false }],
     routes: [{ method: "POST", path: "/mcp", purpose: "JSON-RPC tools/call dispatch." }],
-    handler_plan: { type: category === "build" ? "factory_blueprint" : "custom", steps: ["Validate JSON input against input_schema.", "Collect source evidence and provenance.", "Return strict JSON with ok/result/evidence.", "Emit a compact receipt when execution_logging is enabled."] },
+    handler_plan: { type: category === "build" ? "factory_blueprint" : "custom", steps: ["Validate JSON input against input_schema.", "Collect source evidence and provenance.", "Return strict JSON with ok/result/evidence."] },
     evidence: sourceEvidence.slice(0, 8),
     tags: [category, "no_auth_dev_mcp", "cloudflare_worker"],
     effort: category === "build" ? "medium" : "small",
@@ -170,7 +169,7 @@ function ensureCandidates(args: { source?: Source; candidates?: Candidate[] }) {
   return parse({ source: args.source }).recommended_tools;
 }
 
-function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string; owner?: string; repo?: string; base_path?: string; mode?: string }) {
+function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string; owner?: string; repo?: string; base_path?: string }) {
   const candidates = ensureCandidates(args);
   const project = slugify(args.project_name ?? `${args.source.name}-tools-mcp`);
   const workerSlug = slugify(args.worker_slug ?? project);
@@ -189,19 +188,19 @@ function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; pro
       base_path: basePath,
       auth: { mode: "none", public_dev_app: true, require_user_login: false, require_bearer_token: false },
       runtime: { platform: "cloudflare_workers", module_format: "esm", compatibility_date: DEFAULT_COMPATIBILITY_DATE },
-      endpoints: [{ method: "GET", path: "/", purpose: "Human and machine-readable service card." }, { method: "GET", path: "/health", purpose: "No-auth liveness and tool inventory." }, { method: "POST", path: "/mcp", purpose: "JSON-RPC initialize, tools/list, and tools/call." }],
+      endpoints: [{ method: "GET", path: "/", purpose: "Service card." }, { method: "GET", path: "/health", purpose: "Liveness." }, { method: "POST", path: "/mcp", purpose: "JSON-RPC MCP." }],
       mcp: { protocol_versions: ["2024-11-05", "2025-03-26"], methods: ["initialize", "tools/list", "tools/call"], tools },
       files: [{ path: `${basePath}/src/index.ts`, role: "worker_mcp_entrypoint", generated: true }, { path: `${basePath}/package.json`, role: "npm_scripts_and_dev_dependencies", generated: true }, { path: `${basePath}/wrangler.toml`, role: "worker_deploy_config", generated: true }, { path: `${basePath}/README.md`, role: "developer_usage_docs", generated: true }, { path: `${basePath}/tests/schema.test.ts`, role: "schema_and_contract_tests", generated: true }],
-      wrangler: { name: workerSlug, main: "src/index.ts", compatibility_date: DEFAULT_COMPATIBILITY_DATE, workers_dev: true, vars: { MCP_SERVER_NAME: workerSlug, AFO_APP_KIND: "no_auth_developer_mcp" }, services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5" }], secrets: Array.from(new Set(tools.flatMap((tool) => tool.bindings_needed.filter((binding: any) => binding.required !== false && binding.type === "secret_text").map((binding: any) => String(binding.binding))))) },
+      wrangler: { name: workerSlug, main: "src/index.ts", compatibility_date: DEFAULT_COMPATIBILITY_DATE, workers_dev: true, vars: { MCP_SERVER_NAME: workerSlug, AFO_APP_KIND: "no_auth_developer_mcp" }, services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5" }], secrets: [] },
       toolsmith: { registry_kind: "generated_no_auth_dev_mcp_app", dedupe_key: `${namespace}/${workerSlug}`, receipt_required: true, cairnstone_source_required: true },
-      receipts: { build_receipt_path: `${basePath}/receipts/build.json`, source_receipt_path: `${basePath}/receipts/source.json`, no_auth_reason: "Developer MCP/app intended for public no-auth tool calls; upstream secrets remain Worker bindings." }
+      receipts: { build_receipt_path: `${basePath}/receipts/build.json`, source_receipt_path: `${basePath}/receipts/source.json", no_auth_reason: "Developer MCP/app intended for public no-auth tool calls." }
     }
   };
 }
 
 function blueprints(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string }) {
   const app = noAuthAppContract(args).app;
-  return [{ metadata: { project_name: app.project_name, version: "0.3.0", namespace: app.namespace, description: `Generated no-auth developer MCP app from ${args.source.type}:${args.source.name}` }, options: { auto_status_tool: true, compatibility_date: DEFAULT_COMPATIBILITY_DATE, execution_logging: true, r2_payload_offload: false, vector_embedding: false, write_receipt: true, no_auth_dev_app: true }, auth: app.auth, endpoints: app.endpoints, mcp: app.mcp, files: app.files, wrangler: app.wrangler, bindings: { services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5", required: false }], d1_databases: [], secrets: [{ name: "GITHUB_TOKEN", description: "Optional GitHub source expansion token.", required: false }] }, tools: app.mcp.tools }];
+  return [{ metadata: { project_name: app.project_name, version: "0.4.0", namespace: app.namespace, description: `Generated no-auth developer MCP app from ${args.source.type}:${args.source.name}` }, options: { auto_status_tool: true, compatibility_date: DEFAULT_COMPATIBILITY_DATE, execution_logging: true, r2_payload_offload: false, vector_embedding: false, write_receipt: true, no_auth_dev_app: true }, auth: app.auth, endpoints: app.endpoints, mcp: app.mcp, files: app.files, wrangler: app.wrangler, bindings: { services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5", required: false }], d1_databases: [], secrets: [{ name: "GITHUB_TOKEN", description: "Optional GitHub source expansion token.", required: false }] }, tools: app.mcp.tools }];
 }
 
 function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_names?: string[] }) {
@@ -216,12 +215,33 @@ function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_
   }).sort((left, right) => right.scores.total - left.scores.total);
 }
 
+function compare(args: { source?: Source; candidates?: Candidate[]; existing_tools?: Array<{ name?: string }> }) {
+  const candidates = ensureCandidates(args);
+  const existingTools = args.existing_tools ?? [];
+  const overlaps = candidates.filter((item) => existingTools.some((tool) => (tool.name ?? "").toLowerCase() === String(item.name).toLowerCase()));
+  const overlapNames = new Set(overlaps.map((item) => item.name));
+  const gaps = candidates.filter((item) => !overlapNames.has(item.name));
+  return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
+}
 
+function plan(args: { source?: Source; candidates?: Candidate[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }) {
+  const scored = score(args) as Array<Candidate & { recommended_action: string }>;
+  const selected = scored.filter((item) => item.recommended_action === "build").slice(0, args.mode === "full" ? 10 : 3);
+  const app = args.source ? noAuthAppContract({ source: args.source, candidates: selected }).app : undefined;
+  return { ok: true, selected_tools: selected.map((item) => item.name), no_auth_app: app, phases: [{ phase: 1, name: "Evidence lock", steps: ["Attach candidates to source evidence."] }, { phase: 2, name: "No-auth MCP contract", steps: ["Generate /, /health, and /mcp endpoints."] }, { phase: 3, name: "Schema hardening", steps: selected.map((item) => `Finalize schema for ${item.name}.`) }], scored_candidates: selected };
+}
+
+function normalizeCairnstoneBase(args: { cairnstone_api_url?: string; cairnstone_mcp_url?: string }, env?: Env) {
+  const raw = args.cairnstone_api_url ?? args.cairnstone_mcp_url ?? env?.CAIRNSTONE_API_URL ?? env?.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL;
+  return String(raw).replace(/\/mcp\/?$/, "").replace(/\/+$/, "");
+}
+
+function mcpUrl(base: string) { return `${base}/mcp`; }
+function serviceUrl(path: string) { return `https://cairnstone-v5${path.startsWith("/") ? path : `/${path}`}`; }
 
 async function fetchCairnstone(env: Env | undefined, base: string, path: string, init: RequestInit) {
   if (env?.CAIRNSTONE_V5) {
-    const request = new Request(serviceUrl(path), init);
-    const response = await env.CAIRNSTONE_V5.fetch(request);
+    const response = await env.CAIRNSTONE_V5.fetch(new Request(serviceUrl(path), init));
     return { response, via: "service_binding:CAIRNSTONE_V5" };
   }
   const response = await fetch(`${base}${path}`, init);
@@ -233,32 +253,12 @@ async function readJsonResponse(response: Response) {
   try { return JSON.parse(text); } catch { return { ok: false, text }; }
 }
 
-async function getJson(base: string, path: string, env?: Env) {
-  const { response, via } = await fetchCairnstone(env, base, path, { method: "GET", headers: { accept: "application/json" } });
-  const payload: any = await readJsonResponse(response);
-  if (!response.ok) throw new Error(`CairnStone GET ${path} via ${via} failed with HTTP ${response.status}`);
-  return payload;
-}
-
-async function postJson(base: string, path: string, body: Record<string, unknown>, env?: Env) {
-  const { response, via } = await fetchCairnstone(env, base, path, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body) });
-  const payload: any = await readJsonResponse(response);
-  if (!response.ok) throw new Error(`CairnStone POST ${path} via ${via} failed with HTTP ${response.status}`);
-  return payload;
-}
-
 function decodeJsonText(value: any): any {
   if (value?.structuredContent) return value.structuredContent;
   if (typeof value?.text === "string") { try { return JSON.parse(value.text); } catch { return value; } }
   const text = value?.content?.find?.((item: any) => item?.type === "text")?.text;
   if (typeof text === "string") { try { return JSON.parse(text); } catch { return { ok: true, text }; } }
   return value;
-}
-
-function normalizeStoneList(payload: any, chain: string): CairnstoneNode[] {
-  const unwrapped = decodeJsonText(payload);
-  const raw = Array.isArray(unwrapped?.stones) ? unwrapped.stones : Array.isArray(unwrapped?.data?.stones) ? unwrapped.data.stones : Array.isArray(unwrapped) ? unwrapped : [];
-  return raw.filter((stone: CairnstoneNode) => !stone.chain || stone.chain === chain);
 }
 
 async function cairnstoneTool(base: string, name: string, args: Record<string, unknown>, env?: Env) {
@@ -271,33 +271,13 @@ async function cairnstoneTool(base: string, name: string, args: Record<string, u
 }
 
 async function cairnstoneManifest(base: string, chain: string, env?: Env): Promise<CairnstoneManifest> {
-  try { return await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain }, env) as CairnstoneManifest; }
-  catch (mcpError) {
-    try { return await getJson(base, `/chains/${encodeURIComponent(chain)}/manifest`, env) as CairnstoneManifest; }
-    catch (manifestRestError) {
-      const listPayload = await getJson(base, `/v1/stones?chain=${encodeURIComponent(chain)}&limit=200`, env);
-      const nodes = normalizeStoneList(listPayload, chain);
-      const head = nodes.find((node) => node.is_head) ?? nodes[0];
-      return { ok: true, chain, head_hash: head?.hash ?? null, head_updated_at: null, stone_count: nodes.length, nodes, edges: [], fallback: { used: "rest_list_stones", mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError), manifest_rest_error: manifestRestError instanceof Error ? manifestRestError.message : String(manifestRestError) } };
-    }
-  }
-}
-
-async function cairnstoneLod(base: string, hash: string, level: "lod4" | "lod5", env?: Env) {
-  try { return await cairnstoneTool(base, "cairnstone_get_lod", { hash, level }, env); }
-  catch (mcpError) {
-    try { return await getJson(base, `/v1/stones/${encodeURIComponent(hash)}/lod/${level}`, env); }
-    catch (restError) { return { ok: false, mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError), rest_error: restError instanceof Error ? restError.message : String(restError) }; }
-  }
+  return await cairnstoneTool(base, "cairnstone_get_chain_manifest", { chain }, env) as CairnstoneManifest;
 }
 
 async function cairnstoneQueryExpand(base: string, hash: string, query: string, topK: number, contextLines: number, env?: Env) {
   const body = { stone_hash: hash, query, top_k: topK, context_lines: contextLines, include_metadata: true };
   try { return await cairnstoneTool(base, "cairnstone_query_and_expand", body, env); }
-  catch (mcpError) {
-    try { return await postJson(base, "/v1/query-expand", body, env); }
-    catch (restError) { return { ok: false, mcp_error: mcpError instanceof Error ? mcpError.message : String(mcpError), rest_error: restError instanceof Error ? restError.message : String(restError) }; }
-  }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 }
 
 function nodeSummary(node: CairnstoneNode) { return [`hash=${node.hash ?? ""}`, `head=${node.is_head === true}`, `title=${node.title ?? ""}`, `lod5=${node.lod5 ?? ""}`].join(" | "); }
@@ -314,11 +294,12 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   const headHash = manifest.head_hash ?? nodes.find((node) => node.is_head)?.hash ?? nodes[0]?.hash;
   if (!headHash) throw new Error(`No HEAD or stones found for chain: ${args.chain}`);
   const selectedNodes = [...nodes.filter((node) => node.hash === headHash), ...nodes.filter((node) => node.hash !== headHash)].slice(0, maxStones);
-  const [headLod5, headLod4, queryExpand] = await Promise.all([cairnstoneLod(base, headHash, "lod5", env), cairnstoneLod(base, headHash, "lod4", env), cairnstoneQueryExpand(base, headHash, query, topK, contextLines, env)]);
-  const content = [`CHAIN ${args.chain}`, `HEAD ${headHash}`, `HEAD_UPDATED_AT ${manifest.head_updated_at ?? ""}`, `STONE_COUNT ${manifest.stone_count ?? nodes.length}`, "", "LOD_SUMMARIES", ...selectedNodes.map(nodeSummary), "", "HEAD_LOD5", JSON.stringify(headLod5), "", "HEAD_LOD4", JSON.stringify(headLod4), "", "QUERY_EXPAND", JSON.stringify(queryExpand), "", "GRAPH_EDGES", JSON.stringify(manifest.edges ?? [])].join("\n");
-  const minedSource: Source = { type: "cairnstone_chain", name: args.chain, content, metadata: { chain: args.chain, head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length, cairnstone_api_url: base, bridge_source: manifest.fallback ? "fallback" : (manifest as any).bridge_source ?? (env?.CAIRNSTONE_V5 ? "service_binding:CAIRNSTONE_V5" : "http_fallback"), query } };
+  const queryExpand = await cairnstoneQueryExpand(base, headHash, query, topK, contextLines, env);
+  const content = [`CHAIN ${args.chain}`, `HEAD ${headHash}`, `STONE_COUNT ${manifest.stone_count ?? nodes.length}`, "", "LOD_SUMMARIES", ...selectedNodes.map(nodeSummary), "", "QUERY_EXPAND", JSON.stringify(queryExpand), "", "GRAPH_EDGES", JSON.stringify(manifest.edges ?? [])].join("\n");
+  const bridgeSource = manifest.bridge_source ?? (env?.CAIRNSTONE_V5 ? "service_binding:CAIRNSTONE_V5" : "http_fallback");
+  const minedSource: Source = { type: "cairnstone_chain", name: args.chain, content, metadata: { chain: args.chain, head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length, cairnstone_api_url: base, bridge_source: bridgeSource, query } };
   const parsed = parse({ source: minedSource });
-  return { ...parsed, blueprints: blueprints({ source: minedSource, candidates: parsed.recommended_tools }), no_auth_app: noAuthAppContract({ source: minedSource, candidates: parsed.recommended_tools }).app, chain: args.chain, cairnstone: { api_url: base, mcp_url: mcpUrl(base), bridge_source: minedSource.metadata?.bridge_source, service_binding_configured: Boolean(env?.CAIRNSTONE_V5), head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length }, mining_steps: ["get_chain_manifest", "resolve_HEAD", "collect_LOD_summaries", "query_expand_HEAD", "parse_source_for_tool_opportunities", "generate_no_auth_dev_mcp_app"], manifest_summary: { head_hash: manifest.head_hash, head_updated_at: manifest.head_updated_at, stone_count: manifest.stone_count, edges_count: Array.isArray(manifest.edges) ? manifest.edges.length : 0 }, head_lod5: headLod5, head_lod4: headLod4, query_expand: queryExpand, source_summary: minedSource };
+  return { ...parsed, blueprints: blueprints({ source: minedSource, candidates: parsed.recommended_tools }), no_auth_app: noAuthAppContract({ source: minedSource, candidates: parsed.recommended_tools }).app, chain: args.chain, cairnstone: { api_url: base, mcp_url: mcpUrl(base), bridge_source: bridgeSource, service_binding_configured: Boolean(env?.CAIRNSTONE_V5), head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length }, mining_steps: ["get_chain_manifest", "resolve_HEAD", "collect_LOD_summaries", "query_expand_HEAD", "parse_source_for_tool_opportunities", "generate_no_auth_dev_mcp_app"], manifest_summary: { head_hash: manifest.head_hash, head_updated_at: manifest.head_updated_at, stone_count: manifest.stone_count, edges_count: Array.isArray(manifest.edges) ? manifest.edges.length : 0 }, query_expand: queryExpand, source_summary: minedSource };
 }
 
 export function listTools() {
@@ -350,7 +331,7 @@ async function rpc(request: Request, env?: Env) {
   const payload: any = await request.json();
   const id = payload.id ?? null;
   try {
-    if (payload.method === "initialize") return json({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "cairnstone-tool-miner-mcp", version: "0.3.0" } } });
+    if (payload.method === "initialize") return json({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "cairnstone-tool-miner-mcp", version: "0.4.0" } } });
     if (payload.method === "tools/list") return json({ jsonrpc: "2.0", id, result: { tools: listTools() } });
     if (payload.method === "tools/call") return json({ jsonrpc: "2.0", id, result: await (callTool as any)(payload.params?.name, payload.params?.arguments ?? {}, env) });
     return json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown method" } }, 404);
@@ -363,8 +344,8 @@ export default {
   async fetch(request: Request, env: Env = {}): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return json({});
-    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", version: "0.3.0", auth: { mode: "none", developer_app: true }, tools: toolNames, cairnstone_bridge: { service_binding_configured: Boolean(env.CAIRNSTONE_V5), http_fallback_configured: Boolean(env.CAIRNSTONE_API_URL ?? env.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL) } });
-    if (request.method === "GET" && url.pathname === "/") return json({ ok: true, name: "cairnstone-tool-miner-mcp", version: "0.3.0", app_kind: "no_auth_developer_mcp", endpoints: ["/health", "/mcp"], tools: toolNames });
+    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", version: "0.4.0", auth: { mode: "none", developer_app: true }, tools: toolNames, cairnstone_bridge: { service_binding_configured: Boolean(env.CAIRNSTONE_V5), http_fallback_configured: Boolean(env.CAIRNSTONE_API_URL ?? env.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL) } });
+    if (request.method === "GET" && url.pathname === "/") return json({ ok: true, name: "cairnstone-tool-miner-mcp", version: "0.4.0", app_kind: "no_auth_developer_mcp", endpoints: ["/health", "/mcp"], tools: toolNames });
     if (request.method === "POST" && url.pathname === "/mcp") return rpc(request, env);
     return json({ ok: false, error: "not_found" }, 404);
   }
