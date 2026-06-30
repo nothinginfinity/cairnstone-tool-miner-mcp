@@ -225,9 +225,7 @@ function compare(args: { source?: Source; candidates?: Candidate[]; existing_too
   return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
 }
 
-function plan(args: { source?: Source; candidates?: Candidate[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }) {
 
-  const appArgs: { source: Source; candidates: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string } | undefined = args.source ? { source: args.source, candidates: selected } : undefined;
   if (appArgs && args.project_name !== undefined) appArgs.project_name = args.project_name;
   if (appArgs && args.namespace !== undefined) appArgs.namespace = args.namespace;
   if (appArgs && args.worker_slug !== undefined) appArgs.worker_slug = args.worker_slug;
