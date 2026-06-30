@@ -226,8 +226,7 @@ function compare(args: { source?: Source; candidates?: Candidate[]; existing_too
 }
 
 function plan(args: { source?: Source; candidates?: Candidate[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }) {
-  const scored = score(args);
-  const selected = scored.filter((item) => item.recommended_action === "build").slice(0, args.mode === "full" ? 10 : 3);
+
   const appArgs: { source: Source; candidates: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string } | undefined = args.source ? { source: args.source, candidates: selected } : undefined;
   if (appArgs && args.project_name !== undefined) appArgs.project_name = args.project_name;
   if (appArgs && args.namespace !== undefined) appArgs.namespace = args.namespace;
