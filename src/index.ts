@@ -473,6 +473,36 @@ async function cairnstoneTool(base: string, name: string, args: Record<string, u
   return decodeMcpToolResult(payload.result);
 }
 
+async function debugCairnstoneFetch(args: any, env?: Env) {
+  const base = normalizeCairnstoneBase(args, env);
+  const url = mcpUrl(base);
+  const out: any = { base, url, env_seen: { CAIRNSTONE_API_URL: env?.CAIRNSTONE_API_URL, CAIRNSTONE_MCP_URL: env?.CAIRNSTONE_MCP_URL } };
+  try {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: `debug-${Date.now()}`, method: "tools/call", params: { name: "cairnstone_get_chain_manifest", arguments: { chain: args.chain } } });
+    out.request_body = body;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+    } catch (fetchError) {
+      out.fetch_threw = true;
+      out.fetch_error_name = fetchError instanceof Error ? fetchError.name : typeof fetchError;
+      out.fetch_error_message = fetchError instanceof Error ? fetchError.message : String(fetchError);
+      out.fetch_error_stack = fetchError instanceof Error ? fetchError.stack : undefined;
+      return out;
+    }
+    out.response_status = response.status;
+    out.response_ok = response.ok;
+    out.response_headers = Object.fromEntries(response.headers.entries());
+    const rawText = await response.text();
+    out.raw_body_first_2000 = rawText.slice(0, 2000);
+    try { out.parsed = JSON.parse(rawText); } catch (parseError) { out.parse_error = parseError instanceof Error ? parseError.message : String(parseError); }
+  } catch (outerError) {
+    out.outer_error = outerError instanceof Error ? outerError.message : String(outerError);
+    out.outer_stack = outerError instanceof Error ? outerError.stack : undefined;
+  }
+  return out;
+}
+
 function nodeSummary(node: CairnstoneNode) {
   return [`hash=${node.hash ?? ""}`, `head=${node.is_head === true}`, `title=${node.title ?? ""}`, `lod5=${node.lod5 ?? ""}`].join(" | ");
 }
@@ -532,7 +562,8 @@ export function callTool(name: string, args: any) {
     score_tool_candidates: () => ({ ok: true, candidates: score(args) }),
     compare_against_toolsmith_inventory: () => compare(args),
     create_build_plan: () => plan(args),
-    mine_cairnstone_chain: () => mineChain(args, env)
+    mine_cairnstone_chain: () => mineChain(args, env),
+    debug_cairnstone_fetch: () => debugCairnstoneFetch(args, env)
   };
   const result = table[name]?.();
   if (!result) throw new Error(`Unknown tool: ${name}`);
