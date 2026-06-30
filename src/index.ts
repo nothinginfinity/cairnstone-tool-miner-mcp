@@ -225,12 +225,6 @@ function compare(args: { source?: Source; candidates?: Candidate[]; existing_too
   return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
 }
 
-
-  const raw = args.cairnstone_api_url ?? args.cairnstone_mcp_url ?? env?.CAIRNSTONE_API_URL ?? env?.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL;
-  return String(raw).replace(/\/mcp\/?$/, "").replace(/\/+$/, "");
-}
-
-function mcpUrl(base: string) { return `${base}/mcp`; }
 function serviceUrl(path: string) { return `https://cairnstone-v5${path.startsWith("/") ? path : `/${path}`}`; }
 
 async function fetchCairnstone(env: Env | undefined, base: string, path: string, init: RequestInit) {
