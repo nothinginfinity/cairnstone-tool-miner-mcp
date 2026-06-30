@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.5.3";
+const SERVICE_VERSION = "0.5.4";
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
@@ -154,7 +154,7 @@ async function classifySource(source: Source, env?: Env): Promise<{ classificati
   try {
     const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: classificationPrompt(source), max_completion_tokens: 3000 });
     const text = extractModelText(raw);
-    if (!text.trim()) throw new Error(`Empty classifier response. Raw shape: ${JSON.stringify(raw).slice(0, 300)}`);
+    if (!text.trim()) throw new Error(`Empty classifier response. finish_reason=${raw?.choices?.[0]?.finish_reason} reasoning_len=${typeof raw?.choices?.[0]?.message?.reasoning === "string" ? raw.choices[0].message.reasoning.length : "n/a"} Raw shape: ${JSON.stringify(raw).slice(0, 1500)}`);
     const parsed = JSON.parse(extractJsonObject(text));
     const classification = sanitizeClassification(parsed);
     return { classification, via: `workers_ai:${CLASSIFIER_MODEL}` };
