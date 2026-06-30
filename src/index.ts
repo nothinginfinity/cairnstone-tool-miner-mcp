@@ -6,13 +6,17 @@ type Env = {
   CAIRNSTONE_API_URL?: string;
   CAIRNSTONE_MCP_URL?: string;
   CAIRNSTONE_V5?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
 };
 type CairnstoneNode = { hash?: string; title?: string; is_head?: boolean; lod5?: string; lod4?: string; path?: string; repo?: string; chain?: string };
 type CairnstoneManifest = { ok?: boolean; chain?: string; head_hash?: string | null; head_updated_at?: string | null; stone_count?: number; nodes?: CairnstoneNode[]; edges?: unknown[]; bridge_source?: string };
+type Classification = { summary: string; intent: string; topics: string[]; capabilities: Array<{ name: string; category?: string; description?: string; reasoning?: string; confidence?: number }> };
 
 const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
+const CLASSIFIER_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const SERVICE_VERSION = "0.5.0";
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
@@ -26,7 +30,7 @@ const toolNames = [
 ];
 
 const descriptions: Record<string, string> = {
-  parse_source_for_tool_opportunities: "Parse source text/metadata into evidence-backed MCP candidates.",
+  parse_source_for_tool_opportunities: "Parse source text/metadata into evidence-backed MCP candidates. Uses real LLM content classification (Workers AI) when available; falls back to a keyword scanner only if the AI binding is missing or the call fails.",
   extract_existing_mcp_tools: "Detect existing MCP or JSON-RPC tools already present in source.",
   generate_blueprint_candidates: "Convert parsed candidates into build-factory-style blueprint candidates.",
   generate_no_auth_dev_mcp_app: "Generate a complete no-auth developer Cloudflare Worker MCP app contract from mined candidates.",
@@ -90,6 +94,57 @@ function sourceText(source: Source) {
   return `${source.name}\n${source.content ?? ""}\n${JSON.stringify(source.metadata ?? {})}`.toLowerCase();
 }
 
+// --- Phase 1: real content classification (Workers AI), with keyword-bag fallback ---
+
+function classificationPrompt(source: Source) {
+  const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
+  const system = "You are a precise software-capability analyst. Given arbitrary source content (an article, repo file, API doc, landing page, research paper, etc.), identify what the content is actually about and propose 1 to 5 concrete, distinct MCP-tool capabilities that would genuinely help someone work with THIS SPECIFIC content. Every capability must be traceable to something specific in the text, not a generic template. Respond with ONLY valid JSON, no markdown fences, no prose, matching exactly this shape: {\"summary\": string, \"intent\": string, \"topics\": string[], \"capabilities\": [{\"name\": string, \"category\": \"analysis\"|\"extraction\"|\"build\"|\"admin\"|\"ingestion\", \"description\": string, \"reasoning\": string, \"confidence\": number}]}. confidence is between 0 and 1. name should be a short snake_case-able phrase.";
+  return [{ role: "system", content: system }, { role: "user", content: body }];
+}
+
+function extractJsonObject(text: string) {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("No JSON object found in classifier response.");
+  return match[0];
+}
+
+function sanitizeClassification(parsed: any): Classification {
+  if (!parsed || typeof parsed !== "object") throw new Error("Classifier response was not an object.");
+  const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities : [];
+  const cleanCapabilities = capabilities
+    .filter((item: any) => item && typeof item.name === "string" && item.name.trim().length > 0)
+    .map((item: any) => ({
+      name: String(item.name).trim(),
+      category: typeof item.category === "string" ? item.category : "analysis",
+      description: typeof item.description === "string" ? item.description : "",
+      reasoning: typeof item.reasoning === "string" ? item.reasoning : "",
+      confidence: typeof item.confidence === "number" ? item.confidence : 0.6
+    }));
+  if (!cleanCapabilities.length) throw new Error("Classifier returned no usable capabilities.");
+  return {
+    summary: typeof parsed.summary === "string" ? parsed.summary : "",
+    intent: typeof parsed.intent === "string" ? parsed.intent : "unknown",
+    topics: Array.isArray(parsed.topics) ? parsed.topics.filter((item: any) => typeof item === "string").slice(0, 12) : [],
+    capabilities: cleanCapabilities
+  };
+}
+
+async function classifySource(source: Source, env?: Env): Promise<{ classification: Classification | null; via: string; error?: string }> {
+  if (!env?.AI) return { classification: null, via: "no_ai_binding" };
+  try {
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: classificationPrompt(source), max_tokens: 1200 });
+    const text = typeof raw === "string" ? raw : (raw?.response ?? raw?.result?.response ?? "");
+    if (typeof text !== "string" || !text.trim()) throw new Error("Empty classifier response.");
+    const parsed = JSON.parse(extractJsonObject(text));
+    const classification = sanitizeClassification(parsed);
+    return { classification, via: `workers_ai:${CLASSIFIER_MODEL}` };
+  } catch (error) {
+    return { classification: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+// --- Legacy keyword-bag evidence + candidates (fallback path only) ---
+
 function evidence(source: Source): Evidence[] {
   const raw = sourceText(source);
   const terms = ["stone", "chain", "head", "ref", "repo", "tool", "connector", "blueprint", "worker", "d1", "r2", "admin", "status", "receipt", "workflow", "jsonrpc", "tools/list", "tools/call", "inputschema", "auth", "no-auth", "developer", "wrangler", "mcp", "article", "provenance", "permission"];
@@ -146,31 +201,74 @@ function existing(source: Source) {
   return Array.from(new Set(names)).map((name) => ({ name, confidence: 0.8, evidence: [{ kind: "mcp_tool", value: name, reason: "Detected existing tool registration.", confidence: 0.8 }] }));
 }
 
-function parse(args: { source: Source; options?: { max_candidates?: number } }) {
-  if (!args?.source?.name || !args?.source?.type) throw new Error("source.type and source.name are required.");
-  const e = evidence(args.source);
-  const raw = sourceText(args.source);
-  const candidates: Candidate[] = [];
-  if (["stone", "chain", "head", "ref"].some((term) => raw.includes(term))) candidates.push(candidate("parse_cairnstone_chain_for_tools", "analysis", "Parse a CairnStone chain manifest and HEAD refs into MCP tool opportunities.", e));
-  if (["mcp", "tools/list", "tools/call", "inputschema", "jsonrpc"].some((term) => raw.includes(term))) candidates.push(candidate("extract_existing_mcp_tools", "extraction", "Extract existing MCP tools from code, manifests, and JSON-RPC handlers.", e));
-  if (["blueprint", "worker", "wrangler", "d1", "r2"].some((term) => raw.includes(term))) candidates.push(candidate("generate_mcp_blueprint_candidates", "build", "Generate build-factory-compatible MCP blueprint candidates.", e));
-  if (["admin", "status", "health", "deployment", "run"].some((term) => raw.includes(term))) candidates.push(candidate("inspect_source_operational_surfaces", "admin", "Inspect admin, status, deployment, and operational surfaces.", e));
-  if (["article", "url", "source", "provenance", "copyright", "permission"].some((term) => raw.includes(term))) {
-    candidates.push(candidate("article_url_to_safe_mini_repo", "ingestion", "Create a copyright-safe article mini-repo with source metadata, provenance, derived notes, candidates, and build plan.", e, {
-      input_schema: { type: "object", additionalProperties: false, required: ["url", "repo", "base_path"], properties: { url: { type: "string" }, owner: { type: "string" }, repo: { type: "string" }, branch: { type: "string", default: "main" }, base_path: { type: "string" }, allow_full_text: { type: "boolean", default: false } } }
-    }));
-  }
-  return { ok: true, source: args.source, summary: { evidence_count: e.length, candidate_count: candidates.length, existing_mcp_tool_count: existing(args.source).length }, evidence: e, existing_mcp_tools_detected: existing(args.source), recommended_tools: candidates.slice(0, args.options?.max_candidates ?? 12) };
+function maybeArticleIngestionCandidate(raw: string, sourceEvidence: Evidence[], intentHint?: string): Candidate | null {
+  const signal = ["article", "url", "provenance", "copyright", "permission"].some((term) => raw.includes(term)) || /article|ingest/i.test(intentHint ?? "");
+  if (!signal) return null;
+  return candidate("article_url_to_safe_mini_repo", "ingestion", "Create a copyright-safe article mini-repo with source metadata, provenance, derived notes, candidates, and build plan.", sourceEvidence, {
+    input_schema: { type: "object", additionalProperties: false, required: ["url", "repo", "base_path"], properties: { url: { type: "string" }, owner: { type: "string" }, repo: { type: "string" }, branch: { type: "string", default: "main" }, base_path: { type: "string" }, allow_full_text: { type: "boolean", default: false } } }
+  });
 }
 
-function ensureCandidates(args: { source?: Source; candidates?: Candidate[] }) {
+function legacyCandidates(source: Source, sourceEvidence: Evidence[]): Candidate[] {
+  const raw = sourceText(source);
+  const candidates: Candidate[] = [];
+  if (["stone", "chain", "head", "ref"].some((term) => raw.includes(term))) candidates.push(candidate("parse_cairnstone_chain_for_tools", "analysis", "Parse a CairnStone chain manifest and HEAD refs into MCP tool opportunities.", sourceEvidence));
+  if (["mcp", "tools/list", "tools/call", "inputschema", "jsonrpc"].some((term) => raw.includes(term))) candidates.push(candidate("extract_existing_mcp_tools", "extraction", "Extract existing MCP tools from code, manifests, and JSON-RPC handlers.", sourceEvidence));
+  if (["blueprint", "worker", "wrangler", "d1", "r2"].some((term) => raw.includes(term))) candidates.push(candidate("generate_mcp_blueprint_candidates", "build", "Generate build-factory-compatible MCP blueprint candidates.", sourceEvidence));
+  if (["admin", "status", "health", "deployment", "run"].some((term) => raw.includes(term))) candidates.push(candidate("inspect_source_operational_surfaces", "admin", "Inspect admin, status, deployment, and operational surfaces.", sourceEvidence));
+  const article = maybeArticleIngestionCandidate(raw, sourceEvidence);
+  if (article) candidates.push(article);
+  return candidates;
+}
+
+// --- Classification-driven candidates (primary path) ---
+
+function classifiedCandidates(source: Source, classification: Classification, sourceEvidence: Evidence[], maxCandidates: number): Candidate[] {
+  const raw = sourceText(source);
+  const fromClassifier = classification.capabilities.slice(0, maxCandidates).map((cap) =>
+    candidate(cap.name, cap.category || "analysis", cap.description || cap.reasoning || "Candidate derived from real content classification of the source.", sourceEvidence, {
+      why_useful: cap.reasoning || "Candidate is backed by semantic classification of the actual source content, not a keyword template.",
+      confidence: Math.max(0.05, Math.min(0.95, cap.confidence ?? 0.6))
+    })
+  );
+  const article = maybeArticleIngestionCandidate(raw, sourceEvidence, classification.intent);
+  if (article && !fromClassifier.some((item) => item.name === article.name)) fromClassifier.push(article);
+  return fromClassifier;
+}
+
+async function parse(args: { source: Source; options?: { max_candidates?: number } }, env?: Env) {
+  if (!args?.source?.name || !args?.source?.type) throw new Error("source.type and source.name are required.");
+  const raw = sourceText(args.source);
+  const maxCandidates = args.options?.max_candidates ?? 12;
+  const classified = await classifySource(args.source, env);
+  let e: Evidence[];
+  let candidates: Candidate[];
+  let classificationMeta: Record<string, unknown>;
+  if (classified.classification) {
+    const c = classified.classification;
+    e = [
+      { kind: "semantic_intent", value: c.intent || "unknown", reason: c.summary || "Classifier did not provide a summary.", confidence: 0.8 },
+      ...c.topics.map((topic) => ({ kind: "semantic_topic", value: topic, reason: c.summary || `Source covers ${topic}.`, confidence: 0.75 }))
+    ];
+    candidates = classifiedCandidates(args.source, c, e, maxCandidates);
+    classificationMeta = { mode: "semantic_classification", via: classified.via, summary: c.summary, intent: c.intent, topics: c.topics };
+  } else {
+    e = evidence(args.source);
+    candidates = legacyCandidates(args.source, e);
+    classificationMeta = { mode: "keyword_fallback", via: classified.via, error: classified.error };
+  }
+  const sliced = candidates.slice(0, maxCandidates);
+  return { ok: true, source: args.source, summary: { evidence_count: e.length, candidate_count: sliced.length, existing_mcp_tool_count: existing(args.source).length }, evidence: e, existing_mcp_tools_detected: existing(args.source), recommended_tools: sliced, classification: classificationMeta };
+}
+
+async function ensureCandidates(args: { source?: Source; candidates?: Candidate[] }, env?: Env) {
   if (Array.isArray(args.candidates) && args.candidates.length) return args.candidates;
   if (!args.source) throw new Error("Provide either candidates or source.");
-  return parse({ source: args.source }).recommended_tools;
+  return (await parse({ source: args.source }, env)).recommended_tools;
 }
 
-function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string; owner?: string; repo?: string; base_path?: string }) {
-  const candidates = ensureCandidates(args);
+async function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string; owner?: string; repo?: string; base_path?: string }, env?: Env) {
+  const candidates = await ensureCandidates(args, env);
   const project = slugify(args.project_name ?? `${args.source.name}-tools-mcp`);
   const workerSlug = slugify(args.worker_slug ?? project);
   const basePath = args.base_path ?? `apps/${workerSlug}`;
@@ -192,19 +290,18 @@ function noAuthAppContract(args: { source: Source; candidates?: Candidate[]; pro
       mcp: { protocol_versions: ["2024-11-05", "2025-03-26"], methods: ["initialize", "tools/list", "tools/call"], tools },
       files: [{ path: `${basePath}/src/index.ts`, role: "worker_mcp_entrypoint", generated: true }, { path: `${basePath}/package.json`, role: "npm_scripts_and_dev_dependencies", generated: true }, { path: `${basePath}/wrangler.toml`, role: "worker_deploy_config", generated: true }, { path: `${basePath}/README.md`, role: "developer_usage_docs", generated: true }, { path: `${basePath}/tests/schema.test.ts`, role: "schema_and_contract_tests", generated: true }],
       wrangler: { name: workerSlug, main: "src/index.ts", compatibility_date: DEFAULT_COMPATIBILITY_DATE, workers_dev: true, vars: { MCP_SERVER_NAME: workerSlug, AFO_APP_KIND: "no_auth_developer_mcp" }, services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5" }], secrets: [] },
-      toolsmith: { registry_kind: "generated_no_auth_dev_mcp_app", dedupe_key: `${namespace}/${workerSlug}`, receipt_required: true, cairnstone_source_required: true },
-      
+      toolsmith: { registry_kind: "generated_no_auth_dev_mcp_app", dedupe_key: `${namespace}/${workerSlug}`, receipt_required: true, cairnstone_source_required: true }
     }
   };
 }
 
-function blueprints(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string }) {
-  const app = noAuthAppContract(args).app;
-  return [{ metadata: { project_name: app.project_name, version: "0.4.0", namespace: app.namespace, description: `Generated no-auth developer MCP app from ${args.source.type}:${args.source.name}` }, options: { auto_status_tool: true, compatibility_date: DEFAULT_COMPATIBILITY_DATE, execution_logging: true, r2_payload_offload: false, vector_embedding: false, write_receipt: true, no_auth_dev_app: true }, auth: app.auth, endpoints: app.endpoints, mcp: app.mcp, files: app.files, wrangler: app.wrangler, bindings: { services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5", required: false }], d1_databases: [], secrets: [{ name: "GITHUB_TOKEN", description: "Optional GitHub source expansion token.", required: false }] }, tools: app.mcp.tools }];
+async function blueprints(args: { source: Source; candidates?: Candidate[]; project_name?: string; namespace?: string; worker_slug?: string }, env?: Env) {
+  const app = (await noAuthAppContract(args, env)).app;
+  return [{ metadata: { project_name: app.project_name, version: SERVICE_VERSION, namespace: app.namespace, description: `Generated no-auth developer MCP app from ${args.source.type}:${args.source.name}` }, options: { auto_status_tool: true, compatibility_date: DEFAULT_COMPATIBILITY_DATE, execution_logging: true, r2_payload_offload: false, vector_embedding: false, write_receipt: true, no_auth_dev_app: true }, auth: app.auth, endpoints: app.endpoints, mcp: app.mcp, files: app.files, wrangler: app.wrangler, bindings: { services: [{ binding: "CAIRNSTONE_V5", service: "cairnstone-v5", required: false }], d1_databases: [], secrets: [{ name: "GITHUB_TOKEN", description: "Optional GitHub source expansion token.", required: false }] }, tools: app.mcp.tools }];
 }
 
-function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_names?: string[] }) {
-  const candidates = ensureCandidates(args);
+async function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_names?: string[] }, env?: Env) {
+  const candidates = await ensureCandidates(args, env);
   const existingNames = new Set((args.existing_tool_names ?? []).map((name) => name.toLowerCase()));
   return candidates.map((item) => {
     const duplicate = existingNames.has(String(item.name).toLowerCase());
@@ -215,8 +312,8 @@ function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_
   }).sort((left, right) => right.scores.total - left.scores.total);
 }
 
-function compare(args: { source?: Source; candidates?: Candidate[]; existing_tools?: Array<{ name?: string }> }) {
-  const candidates = ensureCandidates(args);
+async function compare(args: { source?: Source; candidates?: Candidate[]; existing_tools?: Array<{ name?: string }> }, env?: Env) {
+  const candidates = await ensureCandidates(args, env);
   const existingTools = args.existing_tools ?? [];
   const overlaps = candidates.filter((item) => existingTools.some((tool) => (tool.name ?? "").toLowerCase() === String(item.name).toLowerCase()));
   const overlapNames = new Set(overlaps.map((item) => item.name));
@@ -224,10 +321,10 @@ function compare(args: { source?: Source; candidates?: Candidate[]; existing_too
   return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
 }
 
-function plan(args: { source?: Source; candidates?: Candidate[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }) {
-  const scored = score(args) as Array<Candidate & { recommended_action: string }>;
+async function plan(args: { source?: Source; candidates?: Candidate[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }, env?: Env) {
+  const scored = (await score(args, env)) as Array<Candidate & { recommended_action: string }>;
   const selected = scored.filter((item) => item.recommended_action === "build").slice(0, args.mode === "full" ? 10 : 3);
-  const app = args.source ? noAuthAppContract({ source: args.source, candidates: selected }).app : undefined;
+  const app = args.source ? (await noAuthAppContract({ source: args.source, candidates: selected }, env)).app : undefined;
   return { ok: true, selected_tools: selected.map((item) => item.name), no_auth_app: app, phases: [{ phase: 1, name: "Evidence lock", steps: ["Attach candidates to source evidence."] }, { phase: 2, name: "No-auth MCP contract", steps: ["Generate /, /health, and /mcp endpoints."] }, { phase: 3, name: "Schema hardening", steps: selected.map((item) => `Finalize schema for ${item.name}.`) }], scored_candidates: selected };
 }
 
@@ -298,8 +395,10 @@ async function mineChain(args: { chain: string; query?: string; max_stones?: num
   const content = [`CHAIN ${args.chain}`, `HEAD ${headHash}`, `STONE_COUNT ${manifest.stone_count ?? nodes.length}`, "", "LOD_SUMMARIES", ...selectedNodes.map(nodeSummary), "", "QUERY_EXPAND", JSON.stringify(queryExpand), "", "GRAPH_EDGES", JSON.stringify(manifest.edges ?? [])].join("\n");
   const bridgeSource = manifest.bridge_source ?? (env?.CAIRNSTONE_V5 ? "service_binding:CAIRNSTONE_V5" : "http_fallback");
   const minedSource: Source = { type: "cairnstone_chain", name: args.chain, content, metadata: { chain: args.chain, head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length, cairnstone_api_url: base, bridge_source: bridgeSource, query } };
-  const parsed = parse({ source: minedSource });
-  return { ...parsed, blueprints: blueprints({ source: minedSource, candidates: parsed.recommended_tools }), no_auth_app: noAuthAppContract({ source: minedSource, candidates: parsed.recommended_tools }).app, chain: args.chain, cairnstone: { api_url: base, mcp_url: mcpUrl(base), bridge_source: bridgeSource, service_binding_configured: Boolean(env?.CAIRNSTONE_V5), head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length }, mining_steps: ["get_chain_manifest", "resolve_HEAD", "collect_LOD_summaries", "query_expand_HEAD", "parse_source_for_tool_opportunities", "generate_no_auth_dev_mcp_app"], manifest_summary: { head_hash: manifest.head_hash, head_updated_at: manifest.head_updated_at, stone_count: manifest.stone_count, edges_count: Array.isArray(manifest.edges) ? manifest.edges.length : 0 }, query_expand: queryExpand, source_summary: minedSource };
+  const parsed = await parse({ source: minedSource }, env);
+  const builtBlueprints = await blueprints({ source: minedSource, candidates: parsed.recommended_tools }, env);
+  const noAuthApp = (await noAuthAppContract({ source: minedSource, candidates: parsed.recommended_tools }, env)).app;
+  return { ...parsed, blueprints: builtBlueprints, no_auth_app: noAuthApp, chain: args.chain, cairnstone: { api_url: base, mcp_url: mcpUrl(base), bridge_source: bridgeSource, service_binding_configured: Boolean(env?.CAIRNSTONE_V5), head_hash: headHash, node_count: nodes.length, selected_node_count: selectedNodes.length }, mining_steps: ["get_chain_manifest", "resolve_HEAD", "collect_LOD_summaries", "query_expand_HEAD", "parse_source_for_tool_opportunities", "generate_no_auth_dev_mcp_app"], manifest_summary: { head_hash: manifest.head_hash, head_updated_at: manifest.head_updated_at, stone_count: manifest.stone_count, edges_count: Array.isArray(manifest.edges) ? manifest.edges.length : 0 }, query_expand: queryExpand, source_summary: minedSource };
 }
 
 export function listTools() {
@@ -309,13 +408,13 @@ export function listTools() {
 export function callTool(name: string, args: any) {
   const env = (arguments.length > 2 ? arguments[2] : undefined) as Env | undefined;
   const table: Record<string, () => unknown | Promise<unknown>> = {
-    parse_source_for_tool_opportunities: () => parse(args),
+    parse_source_for_tool_opportunities: () => parse(args, env),
     extract_existing_mcp_tools: () => ({ ok: true, tools: existing(args.source) }),
-    generate_blueprint_candidates: () => ({ ok: true, blueprints: blueprints(args) }),
-    generate_no_auth_dev_mcp_app: () => noAuthAppContract(args),
-    score_tool_candidates: () => ({ ok: true, candidates: score(args) }),
-    compare_against_toolsmith_inventory: () => compare(args),
-    create_build_plan: () => plan(args),
+    generate_blueprint_candidates: () => blueprints(args, env).then((list) => ({ ok: true, blueprints: list })),
+    generate_no_auth_dev_mcp_app: () => noAuthAppContract(args, env),
+    score_tool_candidates: () => score(args, env).then((list) => ({ ok: true, candidates: list })),
+    compare_against_toolsmith_inventory: () => compare(args, env),
+    create_build_plan: () => plan(args, env),
     mine_cairnstone_chain: () => mineChain(args, env)
   };
   const result = table[name]?.();
@@ -331,7 +430,7 @@ async function rpc(request: Request, env?: Env) {
   const payload: any = await request.json();
   const id = payload.id ?? null;
   try {
-    if (payload.method === "initialize") return json({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "cairnstone-tool-miner-mcp", version: "0.4.0" } } });
+    if (payload.method === "initialize") return json({ jsonrpc: "2.0", id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "cairnstone-tool-miner-mcp", version: SERVICE_VERSION } } });
     if (payload.method === "tools/list") return json({ jsonrpc: "2.0", id, result: { tools: listTools() } });
     if (payload.method === "tools/call") return json({ jsonrpc: "2.0", id, result: await (callTool as any)(payload.params?.name, payload.params?.arguments ?? {}, env) });
     return json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown method" } }, 404);
@@ -344,8 +443,8 @@ export default {
   async fetch(request: Request, env: Env = {}): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return json({});
-    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", version: "0.4.0", auth: { mode: "none", developer_app: true }, tools: toolNames, cairnstone_bridge: { service_binding_configured: Boolean(env.CAIRNSTONE_V5), http_fallback_configured: Boolean(env.CAIRNSTONE_API_URL ?? env.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL) } });
-    if (request.method === "GET" && url.pathname === "/") return json({ ok: true, name: "cairnstone-tool-miner-mcp", version: "0.4.0", app_kind: "no_auth_developer_mcp", endpoints: ["/health", "/mcp"], tools: toolNames });
+    if (request.method === "GET" && url.pathname === "/health") return json({ ok: true, service: "cairnstone-tool-miner-mcp", version: SERVICE_VERSION, auth: { mode: "none", developer_app: true }, tools: toolNames, cairnstone_bridge: { service_binding_configured: Boolean(env.CAIRNSTONE_V5), http_fallback_configured: Boolean(env.CAIRNSTONE_API_URL ?? env.CAIRNSTONE_MCP_URL ?? DEFAULT_CAIRNSTONE_API_URL) }, ai_classifier: { binding_configured: Boolean(env.AI), model: CLASSIFIER_MODEL } });
+    if (request.method === "GET" && url.pathname === "/") return json({ ok: true, name: "cairnstone-tool-miner-mcp", version: SERVICE_VERSION, app_kind: "no_auth_developer_mcp", endpoints: ["/health", "/mcp"], tools: toolNames });
     if (request.method === "POST" && url.pathname === "/mcp") return rpc(request, env);
     return json({ ok: false, error: "not_found" }, 404);
   }
