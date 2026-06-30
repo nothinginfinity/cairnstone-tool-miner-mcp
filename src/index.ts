@@ -216,16 +216,7 @@ function score(args: { source?: Source; candidates?: Candidate[]; existing_tool_
   }).sort((left, right) => right.scores.total - left.scores.total);
 }
 
-function compare(args: { source?: Source; candidates?: Candidate[]; existing_tools?: Array<{ name?: string }> }) {
-  const candidates = ensureCandidates(args);
-  const existingTools = args.existing_tools ?? [];
-  const overlaps = candidates.filter((item) => existingTools.some((tool) => (tool.name ?? "").toLowerCase() === String(item.name).toLowerCase()));
-  const overlapNames = new Set(overlaps.map((item) => item.name));
-  const gaps = candidates.filter((item) => !overlapNames.has(item.name));
-  return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
-}
 
-function serviceUrl(path: string) { return `https://cairnstone-v5${path.startsWith("/") ? path : `/${path}`}`; }
 
 async function fetchCairnstone(env: Env | undefined, base: string, path: string, init: RequestInit) {
   if (env?.CAIRNSTONE_V5) {
