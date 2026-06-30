@@ -126,7 +126,7 @@ function candidate(name: string, category: string, description: string, e: Evide
   const safeName = slugify(name).replace(/-/g, "_");
   return {
     name: safeName,
-    display_name: name.split(/[_-]+/g).map((x) => x ? x[0].toUpperCase() + x.slice(1) : x).join(" "),
+    display_name: name.split(/[_-]+/g).map((x) => x ? (x[0] ?? "").toUpperCase() + x.slice(1) : x).join(" "),
     description,
     category,
     priority: e.length > 8 ? "high" : e.length > 3 ? "medium" : "low",
@@ -336,7 +336,13 @@ function compare(args: { source?: Source; candidates?: any[]; existing_tools?: A
 function plan(args: { source?: Source; candidates?: any[]; mode?: string; project_name?: string; namespace?: string; worker_slug?: string }) {
   const scored = score(args);
   const selected = scored.filter((c) => c.recommended_action === "build").slice(0, args.mode === "full" ? 10 : 3);
-  const app = args.source ? noAuthAppContract({ source: args.source, candidates: selected, project_name: args.project_name, namespace: args.namespace, worker_slug: args.worker_slug }).app : undefined;
+  const app = args.source ? noAuthAppContract({
+    source: args.source,
+    candidates: selected,
+    ...(args.project_name !== undefined ? { project_name: args.project_name } : {}),
+    ...(args.namespace !== undefined ? { namespace: args.namespace } : {}),
+    ...(args.worker_slug !== undefined ? { worker_slug: args.worker_slug } : {})
+  }).app : undefined;
   return {
     ok: true,
     selected_tools: selected.map((c) => c.name),
