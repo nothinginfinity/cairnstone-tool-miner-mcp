@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.5.1";
+const SERVICE_VERSION = "0.5.2";
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
@@ -129,12 +129,27 @@ function sanitizeClassification(parsed: any): Classification {
   };
 }
 
+function extractModelText(raw: any): string {
+  if (typeof raw === "string") return raw;
+  if (typeof raw?.response === "string") return raw.response;
+  if (typeof raw?.result?.response === "string") return raw.result.response;
+  const choiceContent = raw?.choices?.[0]?.message?.content;
+  if (typeof choiceContent === "string") return choiceContent;
+  if (Array.isArray(choiceContent)) {
+    const joined = choiceContent.map((part: any) => typeof part === "string" ? part : part?.text ?? "").join("");
+    if (joined.trim()) return joined;
+  }
+  const toolArgs = raw?.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
+  if (typeof toolArgs === "string") return toolArgs;
+  return "";
+}
+
 async function classifySource(source: Source, env?: Env): Promise<{ classification: Classification | null; via: string; error?: string }> {
   if (!env?.AI) return { classification: null, via: "no_ai_binding" };
   try {
-    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: classificationPrompt(source), max_tokens: 1200 });
-    const text = typeof raw === "string" ? raw : (raw?.response ?? raw?.result?.response ?? "");
-    if (typeof text !== "string" || !text.trim()) throw new Error("Empty classifier response.");
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: classificationPrompt(source), max_completion_tokens: 1200 });
+    const text = extractModelText(raw);
+    if (!text.trim()) throw new Error(`Empty classifier response. Raw shape: ${JSON.stringify(raw).slice(0, 300)}`);
     const parsed = JSON.parse(extractJsonObject(text));
     const classification = sanitizeClassification(parsed);
     return { classification, via: `workers_ai:${CLASSIFIER_MODEL}` };
