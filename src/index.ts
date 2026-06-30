@@ -225,11 +225,6 @@ function compare(args: { source?: Source; candidates?: Candidate[]; existing_too
   return { ok: true, counts: { candidates: candidates.length, existing_tools: existingTools.length, overlaps: overlaps.length, gaps: gaps.length }, overlaps, gaps };
 }
 
-
-  if (appArgs && args.project_name !== undefined) appArgs.project_name = args.project_name;
-  if (appArgs && args.namespace !== undefined) appArgs.namespace = args.namespace;
-  if (appArgs && args.worker_slug !== undefined) appArgs.worker_slug = args.worker_slug;
-  const app = appArgs ? noAuthAppContract(appArgs).app : undefined;
   return { ok: true, selected_tools: selected.map((item) => item.name), no_auth_app: app, phases: [{ phase: 1, name: "Evidence lock", steps: ["Attach candidates to source evidence.", "Create or update a tool-opportunity-report stone."] }, { phase: 2, name: "No-auth MCP contract", steps: ["Generate /, /health, and /mcp endpoints.", "Emit initialize, tools/list, and tools/call handlers.", "Set auth.mode=none and keep upstream credentials as Worker bindings."] }, { phase: 3, name: "Schema hardening", steps: selected.map((item) => `Finalize strict input_schema and output_schema for ${item.name}.`) }, { phase: 4, name: "Blueprint compile dry-run", steps: ["Generate no-auth developer MCP app blueprint.", "Compile Worker files into app path.", "Run typecheck and schema tests."] }, { phase: 5, name: "Stone and index", steps: ["Stone generated files.", "Link generated app stone to source chain with references/documents edge.", "Index in Toolsmith only after dedupe."] }], scored_candidates: selected };
 }
 
