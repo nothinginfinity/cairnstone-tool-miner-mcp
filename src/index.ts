@@ -15,8 +15,8 @@ type Classification = { summary: string; intent: string; topics: string[]; capab
 const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
-const CLASSIFIER_MODEL = "@cf/meta/llama-3.1-8b-instruct";
-const SERVICE_VERSION = "0.5.0";
+const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
+const SERVICE_VERSION = "0.5.1";
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
