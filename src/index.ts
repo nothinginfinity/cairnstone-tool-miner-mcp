@@ -10,13 +10,16 @@ type Env = {
 };
 type CairnstoneNode = { hash?: string; title?: string; is_head?: boolean; lod5?: string; lod4?: string; path?: string; repo?: string; chain?: string };
 type CairnstoneManifest = { ok?: boolean; chain?: string; head_hash?: string | null; head_updated_at?: string | null; stone_count?: number; nodes?: CairnstoneNode[]; edges?: unknown[]; bridge_source?: string };
-type Classification = { summary: string; intent: string; topics: string[]; capabilities: Array<{ name: string; category?: string; description?: string; reasoning?: string; confidence?: number }> };
+type Classification = { summary: string; intent: string; topics: string[]; capabilities: Array<{ name: string; category?: string; description?: string; reasoning?: string; confidence?: number }>; output_types: OutputTypeRecommendation[] };
 
 const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.dev";
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.5.5";
+const SERVICE_VERSION = "0.6.0";
+const OUTPUT_TAXONOMY = ["mcp_tool", "document", "audio_song", "video", "software_app", "game"] as const;
+type OutputType = typeof OUTPUT_TAXONOMY[number];
+type OutputTypeRecommendation = { type: OutputType; score: number; reasoning: string };
 
 const toolNames = [
   "parse_source_for_tool_opportunities",
@@ -26,7 +29,8 @@ const toolNames = [
   "score_tool_candidates",
   "compare_against_toolsmith_inventory",
   "create_build_plan",
-  "mine_cairnstone_chain"
+  "mine_cairnstone_chain",
+  "recommend_output_type"
 ];
 
 const descriptions: Record<string, string> = {
@@ -37,7 +41,8 @@ const descriptions: Record<string, string> = {
   score_tool_candidates: "Rank candidates by utility, evidence, effort, safety, and duplication risk.",
   compare_against_toolsmith_inventory: "Compare recommendations against known Toolsmith tools.",
   create_build_plan: "Produce an ordered build plan for selected candidates.",
-  mine_cairnstone_chain: "Read a CairnStone chain through CAIRNSTONE_V5 service binding first, then HTTP fallback, and return tool recommendations."
+  mine_cairnstone_chain: "Read a CairnStone chain through CAIRNSTONE_V5 service binding first, then HTTP fallback, and return tool recommendations.",
+  recommend_output_type: "Phase 2 router: score a source against the full output taxonomy (mcp_tool, document, audio_song, video, software_app, game) and return ranked recommendations with reasoning, before any type-specific generator runs."
 };
 
 const sourceSchema = {
@@ -98,7 +103,7 @@ function sourceText(source: Source) {
 
 function classificationPrompt(source: Source) {
   const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
-  const system = "You are a precise software-capability analyst. Given arbitrary source content (an article, repo file, API doc, landing page, research paper, etc.), identify what the content is actually about and propose 1 to 5 concrete, distinct MCP-tool capabilities that would genuinely help someone work with THIS SPECIFIC content. Every capability must be traceable to something specific in the text, not a generic template. Respond with ONLY valid JSON, no markdown fences, no prose, matching exactly this shape: {\"summary\": string, \"intent\": string, \"topics\": string[], \"capabilities\": [{\"name\": string, \"category\": \"analysis\"|\"extraction\"|\"build\"|\"admin\"|\"ingestion\", \"description\": string, \"reasoning\": string, \"confidence\": number}]}. confidence is between 0 and 1. name should be a short snake_case-able phrase.";
+  const system = "You are a precise software-capability analyst and content router. Given arbitrary source content (an article, repo file, API doc, landing page, research paper, recipe, song lyric idea, story pitch, etc.), do two things. First, identify what the content is actually about and propose 1 to 5 concrete, distinct MCP-tool capabilities that would genuinely help someone work with THIS SPECIFIC content as an mcp_tool - every capability must be traceable to something specific in the text, not a generic template. Second, score how well this source content is suited to become each of these six output types, even if some scores are low: mcp_tool (a callable API/tool), document (article/report/guide), audio_song (a song or audio piece), video (a video), software_app (a broader interactive app beyond a single MCP tool), game (a game). A source can legitimately score well on more than one type - do not force a single choice. Respond with ONLY valid JSON, no markdown fences, no prose, matching exactly this shape: {\"summary\": string, \"intent\": string, \"topics\": string[], \"capabilities\": [{\"name\": string, \"category\": \"analysis\"|\"extraction\"|\"build\"|\"admin\"|\"ingestion\", \"description\": string, \"reasoning\": string, \"confidence\": number}], \"output_types\": [{\"type\": \"mcp_tool\"|\"document\"|\"audio_song\"|\"video\"|\"software_app\"|\"game\", \"score\": number, \"reasoning\": string}]}. confidence and score are between 0 and 1. name should be a short snake_case-able phrase. output_types must include all six types, each with its own score and reasoning.";
   return [{ role: "system", content: system }, { role: "user", content: body }];
 }
 
@@ -121,11 +126,26 @@ function sanitizeClassification(parsed: any): Classification {
       confidence: typeof item.confidence === "number" ? item.confidence : 0.6
     }));
   if (!cleanCapabilities.length) throw new Error("Classifier returned no usable capabilities.");
+  const rawOutputTypes = Array.isArray(parsed.output_types) ? parsed.output_types : [];
+  const cleanOutputTypes: OutputTypeRecommendation[] = rawOutputTypes
+    .filter((item: any) => item && OUTPUT_TAXONOMY.includes(item.type))
+    .map((item: any) => ({
+      type: item.type as OutputType,
+      score: Math.max(0, Math.min(1, typeof item.score === "number" ? item.score : 0)),
+      reasoning: typeof item.reasoning === "string" ? item.reasoning : ""
+    }));
+  // Fill in any taxonomy members the classifier omitted, at score 0, so callers can always rely on all six being present.
+  for (const type of OUTPUT_TAXONOMY) {
+    if (!cleanOutputTypes.some((item) => item.type === type)) {
+      cleanOutputTypes.push({ type, score: 0, reasoning: "Classifier did not score this output type." });
+    }
+  }
   return {
     summary: typeof parsed.summary === "string" ? parsed.summary : "",
     intent: typeof parsed.intent === "string" ? parsed.intent : "unknown",
     topics: Array.isArray(parsed.topics) ? parsed.topics.filter((item: any) => typeof item === "string").slice(0, 12) : [],
-    capabilities: cleanCapabilities
+    capabilities: cleanCapabilities,
+    output_types: cleanOutputTypes
   };
 }
 
@@ -161,6 +181,29 @@ async function classifySource(source: Source, env?: Env): Promise<{ classificati
   } catch (error) {
     return { classification: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+// --- Phase 2: output-type router. The single fork point deciding what kind of output a
+// source is best suited to become, before any type-specific generator runs. Reuses Phase 1's
+// classification call rather than duplicating classification logic in each lane. ---
+
+function fallbackOutputTypeRecommendations(reason: string): OutputTypeRecommendation[] {
+  return OUTPUT_TAXONOMY.map((type) => type === "mcp_tool"
+    ? { type, score: 0.4, reasoning: `No semantic classification available (${reason}). Falling back to mcp_tool, the only lane with an existing generator in this repo.` }
+    : { type, score: 0, reasoning: `No semantic classification available (${reason}); cannot score this lane without it.` });
+}
+
+async function routeOutputType(source: Source, env?: Env) {
+  const classified = await classifySource(source, env);
+  if (classified.classification) {
+    const recs = classified.classification.output_types.length
+      ? classified.classification.output_types
+      : fallbackOutputTypeRecommendations("classifier omitted output_types");
+    const sorted = [...recs].sort((left, right) => right.score - left.score);
+    return { ok: true, source, mode: "semantic_classification", via: classified.via, taxonomy: OUTPUT_TAXONOMY, output_type_recommendations: sorted, top_recommendation: sorted[0], multi_fit: sorted.filter((item) => item.score >= 0.5).map((item) => item.type) };
+  }
+  const sorted = fallbackOutputTypeRecommendations(classified.via);
+  return { ok: true, source, mode: "keyword_fallback", via: classified.via, error: classified.error, taxonomy: OUTPUT_TAXONOMY, output_type_recommendations: sorted, top_recommendation: sorted[0], multi_fit: ["mcp_tool"] };
 }
 
 // --- Legacy keyword-bag evidence + candidates (fallback path only) ---
@@ -271,7 +314,7 @@ async function parse(args: { source: Source; options?: { max_candidates?: number
       ...c.topics.map((topic) => ({ kind: "semantic_topic", value: topic, reason: c.summary || `Source covers ${topic}.`, confidence: 0.75 }))
     ];
     candidates = classifiedCandidates(args.source, c, e, maxCandidates);
-    classificationMeta = { mode: "semantic_classification", via: classified.via, summary: c.summary, intent: c.intent, topics: c.topics };
+    classificationMeta = { mode: "semantic_classification", via: classified.via, summary: c.summary, intent: c.intent, topics: c.topics, output_types: c.output_types };
   } else {
     e = evidence(args.source);
     candidates = legacyCandidates(args.source, e);
@@ -435,7 +478,8 @@ export function callTool(name: string, args: any) {
     score_tool_candidates: () => score(args, env).then((list) => ({ ok: true, candidates: list })),
     compare_against_toolsmith_inventory: () => compare(args, env),
     create_build_plan: () => plan(args, env),
-    mine_cairnstone_chain: () => mineChain(args, env)
+    mine_cairnstone_chain: () => mineChain(args, env),
+    recommend_output_type: () => routeOutputType(args.source, env)
   };
   const result = table[name]?.();
   if (!result) throw new Error(`Unknown tool: ${name}`);
