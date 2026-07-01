@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.8.1";
+const SERVICE_VERSION = "0.8.2";
 const OUTPUT_TAXONOMY = ["mcp_tool", "document", "audio_song", "video", "software_app", "game"] as const;
 type OutputType = typeof OUTPUT_TAXONOMY[number];
 type OutputTypeRecommendation = { type: OutputType; score: number; reasoning: string };
@@ -177,6 +177,12 @@ function extractModelText(raw: any): string {
   return "";
 }
 
+function stripCodeFence(text: string): string {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n?```$/);
+  return match ? (match[1] ?? "").trim() : trimmed;
+}
+
 async function classifySource(source: Source, env?: Env): Promise<{ classification: Classification | null; via: string; error?: string }> {
   if (!env?.AI) return { classification: null, via: "no_ai_binding" };
   try {
@@ -280,7 +286,7 @@ async function draftDocumentContent(source: Source, blueprint: DocumentBlueprint
     const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: documentDraftPrompt(source, blueprint), max_completion_tokens: 4000 });
     const text = extractModelText(raw);
     if (!text.trim()) throw new Error("Empty document draft response.");
-    return { content: text.trim(), via: `workers_ai:${CLASSIFIER_MODEL}` };
+    return { content: stripCodeFence(text), via: `workers_ai:${CLASSIFIER_MODEL}` };
   } catch (error) {
     return { content: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
   }
@@ -399,7 +405,7 @@ async function draftSoftwareAppEntryFile(source: Source, blueprint: SoftwareAppB
     const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: softwareAppDraftPrompt(source, blueprint), max_completion_tokens: 8000 });
     const text = extractModelText(raw);
     if (!text.trim()) throw new Error("Empty app draft response.");
-    return { content: text.trim(), via: `workers_ai:${CLASSIFIER_MODEL}` };
+    return { content: stripCodeFence(text), via: `workers_ai:${CLASSIFIER_MODEL}` };
   } catch (error) {
     return { content: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
   }
