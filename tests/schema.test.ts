@@ -8,12 +8,14 @@ const source = {
 };
 
 describe("cairnstone tool miner", () => {
-  it("publishes nine MCP tools including chain mining, no-auth app generation, and output-type routing", () => {
+  it("publishes eleven MCP tools including chain mining, no-auth app generation, output-type routing, and the document lane", () => {
     const tools = listTools();
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(11);
     expect(tools.map((tool) => tool.name)).toContain("mine_cairnstone_chain");
     expect(tools.map((tool) => tool.name)).toContain("generate_no_auth_dev_mcp_app");
     expect(tools.map((tool) => tool.name)).toContain("recommend_output_type");
+    expect(tools.map((tool) => tool.name)).toContain("generate_document_blueprint");
+    expect(tools.map((tool) => tool.name)).toContain("generate_document");
   });
 
   it("parses source into candidates", async () => {
@@ -66,5 +68,31 @@ describe("cairnstone tool miner", () => {
     const router = listTools().find((tool) => tool.name === "recommend_output_type");
     expect(router?.inputSchema).toHaveProperty("required");
     expect(JSON.stringify(router?.inputSchema)).toContain("source");
+  });
+
+  it("generates a document blueprint from source, even with no AI binding", async () => {
+    const result = await callTool("generate_document_blueprint", { source });
+    expect(result.structuredContent).toHaveProperty("ok", true);
+    expect(result.structuredContent).toHaveProperty("blueprint");
+    expect(result.structuredContent).toHaveProperty("mode", "keyword_fallback");
+    const serialized = JSON.stringify(result.structuredContent);
+    expect(serialized).toContain("title");
+    expect(serialized).toContain("sections");
+  });
+
+  it("drafts a full document from source, falling back to a structured skeleton with no AI binding", async () => {
+    const result = await callTool("generate_document", { source });
+    expect(result.structuredContent).toHaveProperty("ok", true);
+    expect(result.structuredContent).toHaveProperty("document");
+    const serialized = JSON.stringify(result.structuredContent);
+    expect(serialized).toContain("markdown");
+    expect(serialized).toContain("Source Material");
+  });
+
+  it("exposes dedicated input schemas for the document lane tools", () => {
+    const blueprintTool = listTools().find((tool) => tool.name === "generate_document_blueprint");
+    const draftTool = listTools().find((tool) => tool.name === "generate_document");
+    expect(blueprintTool?.inputSchema).toHaveProperty("required");
+    expect(draftTool?.inputSchema).toHaveProperty("required");
   });
 });
