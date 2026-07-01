@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.7.0";
+const SERVICE_VERSION = "0.8.0";
 const OUTPUT_TAXONOMY = ["mcp_tool", "document", "audio_song", "video", "software_app", "game"] as const;
 type OutputType = typeof OUTPUT_TAXONOMY[number];
 type OutputTypeRecommendation = { type: OutputType; score: number; reasoning: string };
@@ -32,7 +32,9 @@ const toolNames = [
   "mine_cairnstone_chain",
   "recommend_output_type",
   "generate_document_blueprint",
-  "generate_document"
+  "generate_document",
+  "generate_software_app_blueprint",
+  "generate_software_app"
 ];
 
 const descriptions: Record<string, string> = {
@@ -46,7 +48,9 @@ const descriptions: Record<string, string> = {
   mine_cairnstone_chain: "Read a CairnStone chain through CAIRNSTONE_V5 service binding first, then HTTP fallback, and return tool recommendations.",
   recommend_output_type: "Phase 2 router: score a source against the full output taxonomy (mcp_tool, document, audio_song, video, software_app, game) and return ranked recommendations with reasoning, before any type-specific generator runs.",
   generate_document_blueprint: "Phase 3 document lane, candidate/blueprint step: design a markdown document outline (title, summary, 3-8 sections with per-section purpose) tailored to the source content.",
-  generate_document: "Phase 3 document lane, build step: draft a complete markdown document from a source, following a blueprint outline (generated automatically if not provided)."
+  generate_document: "Phase 3 document lane, build step: draft a complete markdown document from a source, following a blueprint outline (generated automatically if not provided).",
+  generate_software_app_blueprint: "Phase 3 software_app lane, candidate/blueprint step: design a minimal concrete app (name, type, tech stack, 3-6 features, entry file) tailored to the source content. Generalizes the no-auth MCP app pattern beyond MCP-only apps.",
+  generate_software_app: "Phase 3 software_app lane, build step: draft the entry file's full contents for an app, following a blueprint (generated automatically if not provided)."
 };
 
 const sourceSchema = {
@@ -298,6 +302,125 @@ async function generateDocument(args: { source: Source; blueprint?: DocumentBlue
   const drafted = await draftDocumentContent(source, blueprint, env);
   const content = drafted.content ?? fallbackDocumentContent(source, blueprint);
   return { ok: true, source, blueprint, document: { title: blueprint.title, format: "markdown", content }, mode: drafted.content ? "semantic_draft" : "keyword_fallback", via: drafted.via };
+}
+
+// --- Phase 3, lane 2: software_app generator. Generalizes the existing no-auth MCP app
+// contract pattern (noAuthAppContract/blueprints) beyond MCP-only apps - covers broader
+// interactive apps (web apps, CLIs, browser extensions, dashboards, static sites) per
+// ROADMAP.md's software_app taxonomy member. Mirrors the same candidate -> blueprint ->
+// build -> verify -> stone cycle as the document lane. ---
+
+type AppFeature = { name: string; description: string };
+type SoftwareAppBlueprint = {
+  app_name: string;
+  app_type: string;
+  summary: string;
+  tech_stack: { frontend: string; backend: string; storage: string };
+  features: AppFeature[];
+  entry_file: { path: string; purpose: string };
+};
+
+const SOFTWARE_APP_TYPES = ["web_app", "cli_tool", "browser_extension", "api_service", "dashboard", "static_site", "other"] as const;
+
+function softwareAppBlueprintPrompt(source: Source) {
+  const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
+  const system = `You are a pragmatic software architect. Given arbitrary source content, design a minimal, concrete software app that would genuinely help someone work with THIS SPECIFIC content - not a generic template. Respond with ONLY valid JSON, no markdown fences, no prose, matching exactly this shape: {"app_name": string, "app_type": "web_app"|"cli_tool"|"browser_extension"|"api_service"|"dashboard"|"static_site"|"other", "summary": string, "tech_stack": {"frontend": string, "backend": string, "storage": string}, "features": [{"name": string, "description": string}], "entry_file": {"path": string, "purpose": string}}. Use "none" for any tech_stack field that does not apply. Produce 3 to 6 features, each traceable to something specific in the source. entry_file should be the single most important file to write first (e.g. index.html for a web_app, main.py for a cli_tool, worker.js for an api_service).`;
+  return [{ role: "system", content: system }, { role: "user", content: body }];
+}
+
+function sanitizeSoftwareAppBlueprint(parsed: any, source: Source): SoftwareAppBlueprint {
+  if (!parsed || typeof parsed !== "object") throw new Error("App blueprint response was not an object.");
+  const rawFeatures = Array.isArray(parsed.features) ? parsed.features : [];
+  const features: AppFeature[] = rawFeatures
+    .filter((item: any) => item && typeof item.name === "string" && item.name.trim().length > 0)
+    .map((item: any) => ({ name: String(item.name).trim(), description: typeof item.description === "string" ? item.description : "" }))
+    .slice(0, 6);
+  if (!features.length) throw new Error("App blueprint returned no usable features.");
+  const appType = typeof parsed.app_type === "string" && SOFTWARE_APP_TYPES.includes(parsed.app_type) ? parsed.app_type : "other";
+  const stack = parsed.tech_stack ?? {};
+  return {
+    app_name: typeof parsed.app_name === "string" && parsed.app_name.trim() ? parsed.app_name.trim() : displayName(source.name),
+    app_type: appType,
+    summary: typeof parsed.summary === "string" ? parsed.summary : "",
+    tech_stack: {
+      frontend: typeof stack.frontend === "string" ? stack.frontend : "none",
+      backend: typeof stack.backend === "string" ? stack.backend : "none",
+      storage: typeof stack.storage === "string" ? stack.storage : "none"
+    },
+    features,
+    entry_file: {
+      path: typeof parsed.entry_file?.path === "string" && parsed.entry_file.path.trim() ? parsed.entry_file.path.trim() : "index.md",
+      purpose: typeof parsed.entry_file?.purpose === "string" ? parsed.entry_file.purpose : "Entry point for the generated app."
+    }
+  };
+}
+
+async function classifySoftwareAppBlueprint(source: Source, env?: Env): Promise<{ blueprint: SoftwareAppBlueprint | null; via: string; error?: string }> {
+  if (!env?.AI) return { blueprint: null, via: "no_ai_binding" };
+  try {
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: softwareAppBlueprintPrompt(source), max_completion_tokens: 2500, response_format: { type: "json_object" } });
+    const text = extractModelText(raw);
+    if (!text.trim()) throw new Error("Empty app blueprint response.");
+    const parsed = JSON.parse(extractJsonObject(text));
+    const blueprint = sanitizeSoftwareAppBlueprint(parsed, source);
+    return { blueprint, via: `workers_ai:${CLASSIFIER_MODEL}` };
+  } catch (error) {
+    return { blueprint: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function fallbackSoftwareAppBlueprint(source: Source, reason: string): SoftwareAppBlueprint {
+  return {
+    app_name: displayName(source.name),
+    app_type: "other",
+    summary: `Fallback blueprint (${reason}); no semantic app design available.`,
+    tech_stack: { frontend: "none", backend: "none", storage: "none" },
+    features: [{ name: "Source Passthrough", description: "Displays the original source content as provided, unprocessed." }],
+    entry_file: { path: "index.md", purpose: "Contains the raw source material with no app logic." }
+  };
+}
+
+async function generateSoftwareAppBlueprint(source: Source, env?: Env) {
+  const result = await classifySoftwareAppBlueprint(source, env);
+  const blueprint = result.blueprint ?? fallbackSoftwareAppBlueprint(source, result.via);
+  return { ok: true, source, mode: result.blueprint ? "semantic_blueprint" : "keyword_fallback", via: result.via, error: result.error, blueprint };
+}
+
+function softwareAppDraftPrompt(source: Source, blueprint: SoftwareAppBlueprint) {
+  const features = blueprint.features.map((item, index) => `${index + 1}. ${item.name} - ${item.description}`).join("\n");
+  const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
+  const system = `You are a software engineer. Write the complete contents of "${blueprint.entry_file.path}" (${blueprint.entry_file.purpose}) for an app called "${blueprint.app_name}" (type: ${blueprint.app_type}, stack: frontend=${blueprint.tech_stack.frontend}, backend=${blueprint.tech_stack.backend}, storage=${blueprint.tech_stack.storage}). It should implement these features, grounded in the source material below - do not invent facts the source does not support:\n${features}\nOutput only the finished file contents, no preamble, no markdown fences, no commentary about what you are doing.`;
+  return [{ role: "system", content: system }, { role: "user", content: body }];
+}
+
+async function draftSoftwareAppEntryFile(source: Source, blueprint: SoftwareAppBlueprint, env?: Env): Promise<{ content: string | null; via: string; error?: string }> {
+  if (!env?.AI) return { content: null, via: "no_ai_binding" };
+  try {
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: softwareAppDraftPrompt(source, blueprint), max_completion_tokens: 4000 });
+    const text = extractModelText(raw);
+    if (!text.trim()) throw new Error("Empty app draft response.");
+    return { content: text.trim(), via: `workers_ai:${CLASSIFIER_MODEL}` };
+  } catch (error) {
+    return { content: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function fallbackSoftwareAppEntryFile(source: Source, blueprint: SoftwareAppBlueprint): string {
+  const heading = `# ${blueprint.app_name}\n\n${blueprint.summary}\n\n`;
+  const featureList = blueprint.features.map((item) => `- **${item.name}**: ${item.description}`).join("\n");
+  const raw = `\n\n## Source Material\n\n${source.content ?? "(no content provided)"}\n`;
+  return heading + "## Planned Features\n\n" + featureList + "\n" + raw;
+}
+
+async function generateSoftwareApp(args: { source: Source; blueprint?: SoftwareAppBlueprint }, env?: Env) {
+  const source = args.source;
+  const blueprintResult: { blueprint: SoftwareAppBlueprint | null; via: string; error?: string } = args.blueprint
+    ? { blueprint: args.blueprint, via: "provided" }
+    : await classifySoftwareAppBlueprint(source, env);
+  const blueprint = blueprintResult.blueprint ?? fallbackSoftwareAppBlueprint(source, blueprintResult.via);
+  const drafted = await draftSoftwareAppEntryFile(source, blueprint, env);
+  const content = drafted.content ?? fallbackSoftwareAppEntryFile(source, blueprint);
+  return { ok: true, source, blueprint, app: { entry_file: { path: blueprint.entry_file.path, content }, features: blueprint.features }, mode: drafted.content ? "semantic_draft" : "keyword_fallback", via: drafted.via };
 }
 
 // --- Legacy keyword-bag evidence + candidates (fallback path only) ---
@@ -575,7 +698,9 @@ export function callTool(name: string, args: any) {
     mine_cairnstone_chain: () => mineChain(args, env),
     recommend_output_type: () => routeOutputType(args.source, env),
     generate_document_blueprint: () => generateDocumentBlueprint(args.source, env),
-    generate_document: () => generateDocument(args, env)
+    generate_document: () => generateDocument(args, env),
+    generate_software_app_blueprint: () => generateSoftwareAppBlueprint(args.source, env),
+    generate_software_app: () => generateSoftwareApp(args, env)
   };
   const result = table[name]?.();
   if (!result) throw new Error(`Unknown tool: ${name}`);
