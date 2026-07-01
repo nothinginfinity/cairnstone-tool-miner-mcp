@@ -8,14 +8,16 @@ const source = {
 };
 
 describe("cairnstone tool miner", () => {
-  it("publishes eleven MCP tools including chain mining, no-auth app generation, output-type routing, and the document lane", () => {
+  it("publishes thirteen MCP tools including chain mining, no-auth app generation, output-type routing, the document lane, and the software_app lane", () => {
     const tools = listTools();
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(13);
     expect(tools.map((tool) => tool.name)).toContain("mine_cairnstone_chain");
     expect(tools.map((tool) => tool.name)).toContain("generate_no_auth_dev_mcp_app");
     expect(tools.map((tool) => tool.name)).toContain("recommend_output_type");
     expect(tools.map((tool) => tool.name)).toContain("generate_document_blueprint");
     expect(tools.map((tool) => tool.name)).toContain("generate_document");
+    expect(tools.map((tool) => tool.name)).toContain("generate_software_app_blueprint");
+    expect(tools.map((tool) => tool.name)).toContain("generate_software_app");
   });
 
   it("parses source into candidates", async () => {
@@ -92,6 +94,33 @@ describe("cairnstone tool miner", () => {
   it("exposes dedicated input schemas for the document lane tools", () => {
     const blueprintTool = listTools().find((tool) => tool.name === "generate_document_blueprint");
     const draftTool = listTools().find((tool) => tool.name === "generate_document");
+    expect(blueprintTool?.inputSchema).toHaveProperty("required");
+    expect(draftTool?.inputSchema).toHaveProperty("required");
+  });
+
+  it("generates a software_app blueprint from source, even with no AI binding", async () => {
+    const result = await callTool("generate_software_app_blueprint", { source });
+    expect(result.structuredContent).toHaveProperty("ok", true);
+    expect(result.structuredContent).toHaveProperty("blueprint");
+    expect(result.structuredContent).toHaveProperty("mode", "keyword_fallback");
+    const serialized = JSON.stringify(result.structuredContent);
+    expect(serialized).toContain("app_name");
+    expect(serialized).toContain("features");
+    expect(serialized).toContain("entry_file");
+  });
+
+  it("drafts a software_app entry file from source, falling back to a structured skeleton with no AI binding", async () => {
+    const result = await callTool("generate_software_app", { source });
+    expect(result.structuredContent).toHaveProperty("ok", true);
+    expect(result.structuredContent).toHaveProperty("app");
+    const serialized = JSON.stringify(result.structuredContent);
+    expect(serialized).toContain("entry_file");
+    expect(serialized).toContain("Source Material");
+  });
+
+  it("exposes dedicated input schemas for the software_app lane tools", () => {
+    const blueprintTool = listTools().find((tool) => tool.name === "generate_software_app_blueprint");
+    const draftTool = listTools().find((tool) => tool.name === "generate_software_app");
     expect(blueprintTool?.inputSchema).toHaveProperty("required");
     expect(draftTool?.inputSchema).toHaveProperty("required");
   });
