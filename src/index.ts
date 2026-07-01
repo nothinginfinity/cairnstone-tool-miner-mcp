@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.8.0";
+const SERVICE_VERSION = "0.8.1";
 const OUTPUT_TAXONOMY = ["mcp_tool", "document", "audio_song", "video", "software_app", "game"] as const;
 type OutputType = typeof OUTPUT_TAXONOMY[number];
 type OutputTypeRecommendation = { type: OutputType; score: number; reasoning: string };
@@ -396,7 +396,7 @@ function softwareAppDraftPrompt(source: Source, blueprint: SoftwareAppBlueprint)
 async function draftSoftwareAppEntryFile(source: Source, blueprint: SoftwareAppBlueprint, env?: Env): Promise<{ content: string | null; via: string; error?: string }> {
   if (!env?.AI) return { content: null, via: "no_ai_binding" };
   try {
-    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: softwareAppDraftPrompt(source, blueprint), max_completion_tokens: 4000 });
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: softwareAppDraftPrompt(source, blueprint), max_completion_tokens: 8000 });
     const text = extractModelText(raw);
     if (!text.trim()) throw new Error("Empty app draft response.");
     return { content: text.trim(), via: `workers_ai:${CLASSIFIER_MODEL}` };
