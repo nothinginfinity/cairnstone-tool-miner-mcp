@@ -16,7 +16,7 @@ const DEFAULT_CAIRNSTONE_API_URL = "https://cairnstone-v5.jaredtechfit.workers.d
 const DEFAULT_NAMESPACE = "com.agentfeedoptimization";
 const DEFAULT_COMPATIBILITY_DATE = "2024-11-01";
 const CLASSIFIER_MODEL = "@cf/zai-org/glm-4.7-flash";
-const SERVICE_VERSION = "0.6.0";
+const SERVICE_VERSION = "0.7.0";
 const OUTPUT_TAXONOMY = ["mcp_tool", "document", "audio_song", "video", "software_app", "game"] as const;
 type OutputType = typeof OUTPUT_TAXONOMY[number];
 type OutputTypeRecommendation = { type: OutputType; score: number; reasoning: string };
@@ -30,7 +30,9 @@ const toolNames = [
   "compare_against_toolsmith_inventory",
   "create_build_plan",
   "mine_cairnstone_chain",
-  "recommend_output_type"
+  "recommend_output_type",
+  "generate_document_blueprint",
+  "generate_document"
 ];
 
 const descriptions: Record<string, string> = {
@@ -42,7 +44,9 @@ const descriptions: Record<string, string> = {
   compare_against_toolsmith_inventory: "Compare recommendations against known Toolsmith tools.",
   create_build_plan: "Produce an ordered build plan for selected candidates.",
   mine_cairnstone_chain: "Read a CairnStone chain through CAIRNSTONE_V5 service binding first, then HTTP fallback, and return tool recommendations.",
-  recommend_output_type: "Phase 2 router: score a source against the full output taxonomy (mcp_tool, document, audio_song, video, software_app, game) and return ranked recommendations with reasoning, before any type-specific generator runs."
+  recommend_output_type: "Phase 2 router: score a source against the full output taxonomy (mcp_tool, document, audio_song, video, software_app, game) and return ranked recommendations with reasoning, before any type-specific generator runs.",
+  generate_document_blueprint: "Phase 3 document lane, candidate/blueprint step: design a markdown document outline (title, summary, 3-8 sections with per-section purpose) tailored to the source content.",
+  generate_document: "Phase 3 document lane, build step: draft a complete markdown document from a source, following a blueprint outline (generated automatically if not provided)."
 };
 
 const sourceSchema = {
@@ -204,6 +208,96 @@ async function routeOutputType(source: Source, env?: Env) {
   }
   const sorted = fallbackOutputTypeRecommendations(classified.via);
   return { ok: true, source, mode: "keyword_fallback", via: classified.via, error: classified.error, taxonomy: OUTPUT_TAXONOMY, output_type_recommendations: sorted, top_recommendation: sorted[0], multi_fit: ["mcp_tool"] };
+}
+
+// --- Phase 3, lane 1: document generator. Cheapest lane to build (closest to existing
+// AFO toolchain doc skills) per ROADMAP.md build order. Mirrors the mcp_tool lane's
+// candidate -> blueprint -> build -> verify -> stone cycle: classify (Phase 1/2, already
+// built) -> generate_document_blueprint (outline) -> generate_document (full draft). ---
+
+type DocumentSection = { heading: string; purpose: string };
+type DocumentBlueprint = { title: string; summary: string; sections: DocumentSection[] };
+
+function documentBlueprintPrompt(source: Source) {
+  const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
+  const system = "You are a technical editor. Given arbitrary source content, design a document outline that would turn this into a clear, well-organized markdown document (report, guide, or article - whichever genuinely fits this content). Respond with ONLY valid JSON, no markdown fences, no prose, matching exactly this shape: {\"title\": string, \"summary\": string, \"sections\": [{\"heading\": string, \"purpose\": string}]}. Produce 3 to 8 sections. Each section's purpose must be a one-sentence description specific to this source's actual content, not generic boilerplate.";
+  return [{ role: "system", content: system }, { role: "user", content: body }];
+}
+
+function sanitizeDocumentBlueprint(parsed: any, source: Source): DocumentBlueprint {
+  if (!parsed || typeof parsed !== "object") throw new Error("Blueprint response was not an object.");
+  const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
+  const sections: DocumentSection[] = rawSections
+    .filter((item: any) => item && typeof item.heading === "string" && item.heading.trim().length > 0)
+    .map((item: any) => ({ heading: String(item.heading).trim(), purpose: typeof item.purpose === "string" ? item.purpose : "" }))
+    .slice(0, 8);
+  if (!sections.length) throw new Error("Blueprint returned no usable sections.");
+  return {
+    title: typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : displayName(source.name),
+    summary: typeof parsed.summary === "string" ? parsed.summary : "",
+    sections
+  };
+}
+
+async function classifyDocumentBlueprint(source: Source, env?: Env): Promise<{ blueprint: DocumentBlueprint | null; via: string; error?: string }> {
+  if (!env?.AI) return { blueprint: null, via: "no_ai_binding" };
+  try {
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: documentBlueprintPrompt(source), max_completion_tokens: 2000, response_format: { type: "json_object" } });
+    const text = extractModelText(raw);
+    if (!text.trim()) throw new Error("Empty blueprint response.");
+    const parsed = JSON.parse(extractJsonObject(text));
+    const blueprint = sanitizeDocumentBlueprint(parsed, source);
+    return { blueprint, via: `workers_ai:${CLASSIFIER_MODEL}` };
+  } catch (error) {
+    return { blueprint: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function fallbackDocumentBlueprint(source: Source, reason: string): DocumentBlueprint {
+  return { title: displayName(source.name), summary: `Fallback blueprint (${reason}); no semantic outline available.`, sections: [{ heading: "Source Material", purpose: "Contains the original source content as provided, unprocessed." }] };
+}
+
+async function generateDocumentBlueprint(source: Source, env?: Env) {
+  const result = await classifyDocumentBlueprint(source, env);
+  const blueprint = result.blueprint ?? fallbackDocumentBlueprint(source, result.via);
+  return { ok: true, source, mode: result.blueprint ? "semantic_blueprint" : "keyword_fallback", via: result.via, error: result.error, blueprint };
+}
+
+function documentDraftPrompt(source: Source, blueprint: DocumentBlueprint) {
+  const outline = blueprint.sections.map((item, index) => `${index + 1}. ${item.heading} - ${item.purpose}`).join("\n");
+  const body = `${source.name}\n\n${(source.content ?? "").slice(0, 6000)}`;
+  const system = `You are a technical writer. Write a complete markdown document titled "${blueprint.title}" following exactly this outline, in order, using level-2 markdown headings (##) for each section:\n${outline}\nBase the content on the source material below - do not invent facts the source does not support, and do not pad with generic filler. Output only the finished markdown document, no preamble, no commentary about what you are doing.`;
+  return [{ role: "system", content: system }, { role: "user", content: body }];
+}
+
+async function draftDocumentContent(source: Source, blueprint: DocumentBlueprint, env?: Env): Promise<{ content: string | null; via: string; error?: string }> {
+  if (!env?.AI) return { content: null, via: "no_ai_binding" };
+  try {
+    const raw: any = await env.AI.run(CLASSIFIER_MODEL, { messages: documentDraftPrompt(source, blueprint), max_completion_tokens: 4000 });
+    const text = extractModelText(raw);
+    if (!text.trim()) throw new Error("Empty document draft response.");
+    return { content: text.trim(), via: `workers_ai:${CLASSIFIER_MODEL}` };
+  } catch (error) {
+    return { content: null, via: "workers_ai_failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function fallbackDocumentContent(source: Source, blueprint: DocumentBlueprint): string {
+  const heading = `# ${blueprint.title}\n\n`;
+  const body = blueprint.sections.map((item) => `## ${item.heading}\n\n${item.purpose}\n`).join("\n");
+  const raw = `\n\n## Source Material\n\n${source.content ?? "(no content provided)"}\n`;
+  return heading + body + raw;
+}
+
+async function generateDocument(args: { source: Source; blueprint?: DocumentBlueprint }, env?: Env) {
+  const source = args.source;
+  const blueprintResult: { blueprint: DocumentBlueprint | null; via: string; error?: string } = args.blueprint
+    ? { blueprint: args.blueprint, via: "provided" }
+    : await classifyDocumentBlueprint(source, env);
+  const blueprint = blueprintResult.blueprint ?? fallbackDocumentBlueprint(source, blueprintResult.via);
+  const drafted = await draftDocumentContent(source, blueprint, env);
+  const content = drafted.content ?? fallbackDocumentContent(source, blueprint);
+  return { ok: true, source, blueprint, document: { title: blueprint.title, format: "markdown", content }, mode: drafted.content ? "semantic_draft" : "keyword_fallback", via: drafted.via };
 }
 
 // --- Legacy keyword-bag evidence + candidates (fallback path only) ---
@@ -479,7 +573,9 @@ export function callTool(name: string, args: any) {
     compare_against_toolsmith_inventory: () => compare(args, env),
     create_build_plan: () => plan(args, env),
     mine_cairnstone_chain: () => mineChain(args, env),
-    recommend_output_type: () => routeOutputType(args.source, env)
+    recommend_output_type: () => routeOutputType(args.source, env),
+    generate_document_blueprint: () => generateDocumentBlueprint(args.source, env),
+    generate_document: () => generateDocument(args, env)
   };
   const result = table[name]?.();
   if (!result) throw new Error(`Unknown tool: ${name}`);
