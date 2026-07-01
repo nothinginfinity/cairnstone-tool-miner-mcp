@@ -8,11 +8,12 @@ const source = {
 };
 
 describe("cairnstone tool miner", () => {
-  it("publishes eight MCP tools including chain mining and no-auth app generation", () => {
+  it("publishes nine MCP tools including chain mining, no-auth app generation, and output-type routing", () => {
     const tools = listTools();
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(9);
     expect(tools.map((tool) => tool.name)).toContain("mine_cairnstone_chain");
     expect(tools.map((tool) => tool.name)).toContain("generate_no_auth_dev_mcp_app");
+    expect(tools.map((tool) => tool.name)).toContain("recommend_output_type");
   });
 
   it("parses source into candidates", async () => {
@@ -44,5 +45,26 @@ describe("cairnstone tool miner", () => {
     const miner = listTools().find((tool) => tool.name === "mine_cairnstone_chain");
     expect(miner?.inputSchema).toHaveProperty("required");
     expect(JSON.stringify(miner?.inputSchema)).toContain("chain");
+  });
+
+  it("routes a source to output-type recommendations covering the full taxonomy, even with no AI binding", async () => {
+    const result = await callTool("recommend_output_type", { source });
+    expect(result.structuredContent).toHaveProperty("ok", true);
+    expect(result.structuredContent).toHaveProperty("mode");
+    expect(result.structuredContent).toHaveProperty("taxonomy");
+    expect(result.structuredContent).toHaveProperty("output_type_recommendations");
+    expect(result.structuredContent).toHaveProperty("top_recommendation");
+    const serialized = JSON.stringify(result.structuredContent);
+    expect(serialized).toContain("mcp_tool");
+    expect(serialized).toContain("software_app");
+    // No AI binding is configured in this unit-test environment, so the router must fall back
+    // gracefully (not throw) and still return a complete, well-shaped taxonomy.
+    expect(result.structuredContent).toHaveProperty("mode", "keyword_fallback");
+  });
+
+  it("exposes a dedicated input schema for output-type routing", () => {
+    const router = listTools().find((tool) => tool.name === "recommend_output_type");
+    expect(router?.inputSchema).toHaveProperty("required");
+    expect(JSON.stringify(router?.inputSchema)).toContain("source");
   });
 });
